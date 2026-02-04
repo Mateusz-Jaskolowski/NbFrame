@@ -1,0 +1,149 @@
+{
+  "model_type": "sequence_classifier",
+  "version": "2026-01-19-corrected",
+  "training_date": "2026-01-19T21:23:13.268575",
+  "description": "Logistic regression sequence classifier with corrected CDR boundaries",
+  "cdr_boundaries": {
+    "note": "CORRECTED 2026-01-19",
+    "CDR1": "27-42",
+    "FR2": "43-56",
+    "CDR2": "57-69",
+    "FR3": "70-107",
+    "CDR3": "108-138",
+    "FR4": "139-149"
+  },
+  "training_info": {
+    "n_training_samples": 829,
+    "n_test_samples": 100,
+    "n_hallmarks": 20,
+    "hallmark_positions": [
+      12,
+      15,
+      17,
+      44,
+      51,
+      54,
+      56,
+      85,
+      103,
+      107
+    ],
+    "feature_selection": "Top 20 by combined correlation",
+    "excluded_positions": [
+      149
+    ]
+  },
+  "performance": {
+    "cv_roc_auc": 0.8546,
+    "cv_accuracy": 0.8191,
+    "cv_pearson_r": 0.682,
+    "test_roc_auc": 0.9394,
+    "test_pr_auc": 0.956,
+    "test_accuracy": 0.86,
+    "test_pearson_r": 0.8117,
+    "test_agreement": 0.86,
+    "test_n": 100
+  },
+  "hallmarks": [
+    {
+      "position": 44,
+      "amino_acid": "F",
+      "log2fc": 1.7243854137661248
+    },
+    {
+      "position": 44,
+      "amino_acid": "Y",
+      "log2fc": -2.76746768256355
+    },
+    {
+      "position": 107,
+      "amino_acid": "A",
+      "log2fc": 1.1961455030569095
+    },
+    {
+      "position": 54,
+      "amino_acid": "L",
+      "log2fc": -2.338624383759676
+    },
+    {
+      "position": 51,
+      "amino_acid": "Q",
+      "log2fc": -2.6345734120662048
+    },
+    {
+      "position": 51,
+      "amino_acid": "E",
+      "log2fc": 0.7243854137661244
+    },
+    {
+      "position": 107,
+      "amino_acid": "N",
+      "log2fc": -2.459894880653258
+    },
+    {
+      "position": 54,
+      "amino_acid": "G",
+      "log2fc": 2.2139698664100225
+    },
+    {
+      "position": 54,
+      "amino_acid": "F",
+      "log2fc": 1.2432587240295083
+    },
+    {
+      "position": 103,
+      "amino_acid": "V",
+      "log2fc": -0.2910682386403883
+    },
+    {
+      "position": 85,
+      "amino_acid": "S",
+      "log2fc": -1.7256475068689234
+    },
+    {
+      "position": 15,
+      "amino_acid": "P",
+      "log2fc": -0.5796324832634707
+    },
+    {
+      "position": 54,
+      "amino_acid": "W",
+      "log2fc": -1.0049669962902066
+    },
+    {
+      "position": 12,
+      "amino_acid": "S",
+      "log2fc": 1.1394229130449685
+    },
+    {
+      "position": 15,
+      "amino_acid": "A",
+      "log2fc": 0.38131151000721347
+    },
+    {
+      "position": 85,
+      "amino_acid": "A",
+      "log2fc": 0.21474300399292173
+    },
+    {
+      "position": 103,
+      "amino_acid": "I",
+      "log2fc": 1.4549247387728976
+    },
+    {
+      "position": 17,
+      "amino_acid": "D",
+      "log2fc": 2.319995158686789
+    },
+    {
+      "position": 56,
+      "amino_acid": "A",
+      "log2fc": -0.19927576272089767
+    },
+    {
+      "position": 12,
+      "amino_acid": "L",
+      "log2fc": -0.14361616844879896
+    }
+  ]
+}

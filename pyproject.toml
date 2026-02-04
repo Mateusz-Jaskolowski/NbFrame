@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nbframe"
+version = "1.0.0"
+authors = [
+    { name="Mateusz Jaskolowski", email="mj667@cam.ac.uk" },
+]
+description = "NbFrame: Classifies nanobody CDR3 conformation (kinked vs extended) from sequences and structures."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file="LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.24",
+    "scikit-learn>=1.2",
+    "joblib>=1.2",
+    "typer>=0.9",
+    "rich>=13.0",
+    "biopython>=1.80",
+    "anarci",
+]
+
+[project.scripts]
+nbframe = "nbframe.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."] # Look for packages in the root directory (finds 'nbframe')
+
+[tool.setuptools.package-data]
+# Include only essential model files (exclude archive directory)
+nbframe = [
+    "data/*.joblib",
+    "data/*.json",
+    "data/*.pdb",
+]

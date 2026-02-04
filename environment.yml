@@ -1,0 +1,24 @@
+name: nbframe
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - python=3.10
+  - hmmer
+  - anarci
+  - scikit-learn>=1.2
+  - biopython>=1.80
+  - pandas>=1.5
+  - numpy>=1.24
+  - pytest
+  - pytest-cov
+  - pip
+  - pip:
+      - joblib
+      - typer
+      - rich
+
+# After creating this environment, install nbframe in development mode:
+# conda activate nbframe
+# cd /path/to/nbframe
+# pip install -e .
