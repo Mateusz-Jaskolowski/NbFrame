@@ -1,0 +1,8 @@
+>too_short|invalid
+QVQL
+>non_amino_acids|invalid
+QVQLVES123INVALID456
+>empty_sequence|invalid
+
+>special_chars|invalid
+QVQL*VES@GGG#LVQ

@@ -1,0 +1,47 @@
+{
+  "model_file": "structure_classifier_pipeline_2026-01-19.joblib",
+  "date_trained": "2026-01-19",
+  "feature_cols": [
+    "alpha_N",
+    "tau_N",
+    "alpha_C",
+    "tau_C",
+    "contact_density",
+    "fr2_rsa_key"
+  ],
+  "label_mapping": {
+    "kinked": 1,
+    "extended": 0
+  },
+  "train_csv": "structures_for_labeling_dedup.csv",
+  "confidence_thresholds": {
+    "kinked_threshold": 0.7,
+    "extended_threshold": 0.3
+  },
+  "performance": {
+    "cv_roc_auc": 0.9608333333333333,
+    "cv_accuracy": 0.9,
+    "cv_precision": 0.8947368421052632,
+    "cv_recall": 0.85,
+    "cv_f1": 0.8717948717948718,
+    "test_roc_auc": 0.994,
+    "test_pr_auc": 0.995,
+    "test_accuracy": 0.94,
+    "n_labeled": 100,
+    "n_kinked_labeled": 40,
+    "n_extended_labeled": 60,
+    "n_train_total": 829,
+    "n_train_kinked": 478,
+    "n_train_extended": 351,
+    "n_grey_zone": 88
+  },
+  "coefficients": {
+    "alpha_N": 0.11379205679436671,
+    "tau_N": 0.6028065429718663,
+    "alpha_C": 0.4769902095968858,
+    "tau_C": -0.4185789745754109,
+    "contact_density": 1.859125050047914,
+    "fr2_rsa_key": -1.15751387742008
+  },
+  "intercept": -0.3522064622649413
+}
