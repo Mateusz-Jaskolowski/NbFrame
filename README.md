@@ -1,15 +1,15 @@
 # NbFrame
 
-**Classify nanobody structure or predict nanobody CDR3 conformation as kinked or extended from sequence alone.**
+**Predict nanobody CDR3 conformation as kinked or extended from sequence or structure.**
 
 NbFrame is a Python package that predicts whether a nanobody (VHH) has a kinked or extended CDR3 loop conformation. It provides both sequence-based and structure-based classifiers with high accuracy.
 
 ## Features
 
 - **Sequence-based classification** using a logistic regression model trained on 20 hallmark features (ROC-AUC: 0.94)
-- **Structure-based classification** from PDB files using geometric and contact features (ROC-AUC: 0.99)
+- **Structure-based classification** from PDB/mmCIF files using geometric and contact features (ROC-AUC: 0.99)
 - **Three-class output**: kinked, extended, or uncertain (with transparent probability thresholds)
-- **Batch processing** for high-throughput analysis (millions of sequences in minutes)
+- **Batch processing** for high-throughput analysis (millions of pre-aligned sequences in minutes; alignment adds overhead)
 - **CLI and Python API** for flexible integration
 
 ## Installation
@@ -72,7 +72,7 @@ nbframe classify-structure -p nanobody.pdb
 Classify a directory of PDBs:
 
 ```bash
-nbframe classify-structure -d pdb_folder/ -o results.csv
+nbframe classify-structure -d pdb_folder/ --output-csv results.csv
 ```
 
 ---
@@ -96,7 +96,7 @@ nbframe classify-sequence [OPTIONS]
 | `-o, --output-csv FILE` | Save results to CSV |
 | `-v, --verbose` | Show detailed output |
 | `--label/--no-label` | Include/exclude classification label (default: label) |
-| `--no-align` | Skip alignment (use for pre-aligned sequences) |
+| `--align/--no-align` | Perform AHo alignment (disable with `--no-align` for pre-aligned sequences) |
 | `--fix-cdr1/--no-fix-cdr1` | Fix CDR-H1 gaps during alignment (default: fix) |
 | `--batch-size INT` | Number of sequences per alignment batch (default: 100) |
 | `--kinked-threshold FLOAT` | Threshold for kinked classification (default: 0.70) |
@@ -184,7 +184,7 @@ df = predict_dataframe(
     sequence_column='sequence',
     verbose=True
 )
-# Adds columns: 'nbframe_score', 'raw_score', 'aligned_sequence'
+# Adds columns: 'nbframe_score', 'raw_score', 'aligned_sequence', 'error'
 ```
 
 ## Classification Thresholds
@@ -200,7 +200,7 @@ Thresholds can be adjusted via `--kinked-threshold` and `--extended-threshold` o
 ## Performance
 
 - **Model**: Logistic Regression with 20 hallmark features
-- **Test Performance**: ROC-AUC 0.941, Accuracy 88.0%
+- **Test Performance**: ROC-AUC 0.939, AP 0.956, Accuracy 86.0%
 - **Speed**: ~3.5 million sequences/minute on M3 MacBook Pro (pre-aligned)
 
 ### Batch Size Recommendations
@@ -228,7 +228,7 @@ results = classify_sequences(sequences, do_alignment=False)
 
 # Structure Classifier
 
-The structure classifier predicts CDR3 conformation from 3D structure (PDB files) using geometric and contact-based features computed from AHo-numbered coordinates.
+The structure classifier predicts CDR3 conformation from 3D structure using geometric and contact-based features computed from AHo-numbered coordinates. Both PDB and mmCIF file formats are supported.
 
 ## Command-Line Interface
 
@@ -240,18 +240,18 @@ nbframe classify-structure [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-p, --pdb FILE` | Single PDB file |
-| `-d, --pdb-dir DIR` | Directory of PDB files |
+| `-p, --pdb FILE` | Single PDB/mmCIF file |
+| `-d, --pdb-dir DIR` | Directory of PDB/mmCIF files |
 | `-c, --chain ID` | Specific chain ID(s), comma-separated |
 | `--output-json FILE` | Save full results as JSON |
 | `--output-csv FILE` | Save summary as CSV |
 | `--output-aho-pdb DIR` | Save AHo-numbered PDBs |
 | `-v, --verbose` | Show detailed output |
 | `--recursive` | Search PDB directory recursively |
-| `--summary-only` | Exclude per-residue features from JSON output |
+| `--summary-only` | Exclude per-structure features from JSON and CSV output |
 | `--no-rmsd-filter` | Disable framework RMSD quality filter |
 | `--rmsd-threshold FLOAT` | Maximum framework RMSD (default: 2.0 Å) |
-| `--progress-interval INT` | Seconds between progress updates for directory mode |
+| `--progress-interval INT` | Number of PDBs processed between progress updates (default: 50) |
 | `--kinked-threshold FLOAT` | Threshold for kinked classification (default: 0.55) |
 | `--extended-threshold FLOAT` | Threshold for extended classification (default: 0.25) |
 
@@ -323,7 +323,7 @@ Thresholds can be adjusted via `--kinked-threshold` and `--extended-threshold` o
 
 - **Model**: Logistic Regression with 6 structural features
 - **Features**: α_N, τ_N, α_C, τ_C, contact density, FR2 RSA
-- **Test Performance**: ROC-AUC 0.994, Accuracy 94.0%
+- **Test Performance**: ROC-AUC 0.994, AP 0.995, Accuracy 94.0%
 
 ## Structural Features
 
@@ -344,25 +344,52 @@ The classifier uses six features computed from AHo-numbered structures:
 
 ### CSV Output
 
-The CSV contains:
-- `name` – Sequence/structure identifier
-- `sequence` – Input sequence (sequence classifier)
-- `nbframe_score` / `prob_kinked` – Probability of kinked conformation
-- `label` – Classification label
+#### Sequence Classifier CSV
+
+The sequence classifier CSV contains:
+- `name` – Sequence identifier (from FASTA header)
+- `sequence` – Input sequence
+- `nbframe_score` – Probability of kinked conformation (P(kinked))
 - `raw_score` – Model logit score
 - `aligned_sequence` – AHo-aligned sequence (if alignment was performed)
+- `label` – Classification label (kinked/extended/uncertain)
+
+#### Structure Classifier CSV
+
+The structure classifier CSV contains:
+- `pdb_path` – Path to the input PDB file
+- `pdb_name` – PDB filename
+- `chain_id` – Chain identifier
+- `label` – Classification label (kinked/extended/uncertain)
+- `prob_kinked` – Probability of kinked conformation
+- `prob_extended` – Probability of extended conformation
+- `feature_*` – Structural feature columns (unless `--summary-only` is used)
 
 ### JSON Output (Structure Classifier)
 
 ```json
 {
+  "pdb_path": "nanobody.pdb",
+  "chain_id_used": "A",
   "label": "kinked",
+  "confidence": 0.95,
+  "prob_kinked": 0.95,
+  "prob_extended": 0.05,
   "probabilities": {"kinked": 0.95, "extended": 0.05},
   "features": {
     "alpha_N": 1.23,
     "tau_N": 0.45,
-    "contact_density": 2.1
-  }
+    "alpha_C": -2.10,
+    "tau_C": 1.85,
+    "contact_density": 0.42,
+    "fr2_rsa_key": 0.31
+  },
+  "model_info": {
+    "model_file": "structure_classifier_pipeline_2026-01-19.joblib",
+    "date_trained": "2026-01-19",
+    "thresholds": {"kinked": 0.55, "extended": 0.25}
+  },
+  "warnings": []
 }
 ```
 

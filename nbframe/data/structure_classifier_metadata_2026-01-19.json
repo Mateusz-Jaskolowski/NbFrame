@@ -15,8 +15,8 @@
   },
   "train_csv": "structures_for_labeling_dedup.csv",
   "confidence_thresholds": {
-    "kinked_threshold": 0.7,
-    "extended_threshold": 0.3
+    "kinked_threshold": 0.55,
+    "extended_threshold": 0.25
   },
   "performance": {
     "cv_roc_auc": 0.9608333333333333,

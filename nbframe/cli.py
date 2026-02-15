@@ -226,7 +226,6 @@ def classify_sequence_cmd(
                 verbose=verbose,
                 do_alignment=align,
                 batch_size=batch_size,
-                output_csv=output_csv,
             )
 
             # Add labels to the dataframe if requested
@@ -236,7 +235,10 @@ def classify_sequence_cmd(
                     if pd.notna(prob) else None
                 )
 
-            if not output_csv:
+            if output_csv:
+                df.to_csv(output_csv, index=False)
+                typer.echo(f"Results saved to {output_csv}", err=True)
+            else:
                 # Render results as a Rich table for preview
                 table = Table(title="NbFrame Sequence Predictions", show_lines=False)
                 table.add_column("Name", no_wrap=True, style="dim")

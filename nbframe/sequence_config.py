@@ -37,7 +37,7 @@ UNCERTAINTY_EXPLANATION: str = (
 #
 # LR-based model (2026-01-19, Soft Labels + Top 20 Combined Correlation)
 # Trained on 829 structures with soft labels, using top 20 hallmarks
-# Test: ROC-AUC 0.941, Accuracy 88.0%, Pearson r 0.812, Agreement 86%
+# Test: ROC-AUC 0.939, AP 0.956, Accuracy 86%, Pearson r 0.812, Agreement 86%
 LR_MODEL_PKG_PATH: str = "data/sequence_classifier_lr_2026-01-19.joblib"
 LR_METADATA_PKG_PATH: str = "data/sequence_classifier_metadata_2026-01-19.json"
 
