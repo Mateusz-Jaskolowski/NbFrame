@@ -403,7 +403,7 @@ Apache License 2.0. See [LICENSE](LICENSE) for details.
 
 If you use NbFrame in your research, please cite:
 
-> [Citation information to be added upon publication]
+> Ali, M., Jaskolowski, M., Greenig, M., Nguyen, T. H., Crnogaj, M., Smorodina, E., Ramon, A., Zhao, H., Fernández-Quintero, M. L., Ghedin, E., Greiff, V., & Sormanni, P. (2026). Disulphide and sequence-encoded conformational priors guide nanobody structure prediction. *bioRxiv*, 2026.02.13.705647. https://doi.org/10.64898/2026.02.13.705647
 
 ## Acknowledgments
 
