@@ -1,7 +1,7 @@
 name: nbframe
 channels:
-  - bioconda
   - conda-forge
+  - bioconda
 dependencies:
   - python=3.10
   - hmmer
