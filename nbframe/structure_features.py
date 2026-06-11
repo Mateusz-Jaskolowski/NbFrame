@@ -255,14 +255,15 @@ def compute_cdr3_fr2_contacts(
     but operates directly on a residues_by_aho mapping.
 
     The contact density is calculated as:
-        num_contacts / total_cdr3_length
+        num_contacts / cdr3_length_nonstem
 
     Where:
         - num_contacts: Number of CDR3-FR2 contacts, counted from CDR3 positions
           EXCLUDING stems (108, 109, 136, 137, 138) since stems are structurally
           constrained and don't contribute to the kinked/extended distinction.
-        - total_cdr3_length: FULL CDR3 length INCLUDING stems (positions 108-138
-          that are present in the structure).
+        - cdr3_length_nonstem: CDR3 length EXCLUDING stems, restricted to
+          residues present in the structure. This matches the contact_density
+          definition the structure classifier was trained on.
 
     Parameters
     ----------
@@ -280,8 +281,6 @@ def compute_cdr3_fr2_contacts(
     fr2_positions = FR2_CONTACT_AHOS
     # For contact counting, exclude stems (they're structurally constrained)
     cdr3_contact_positions = [aho for aho in cdr3_ahos if aho not in CDR3_STEM_AHOS]
-    # For length calculation, include ALL CDR3 positions
-    cdr3_all_positions = list(cdr3_ahos)
 
     num_contacts = 0
     contacts_found = set()  # type: ignore[var-annotated]
@@ -315,9 +314,14 @@ def compute_cdr3_fr2_contacts(
                 if is_contact:
                     break
 
-    # CDR3 length INCLUDING stems, restricted to residues present in the structure
+    # CDR3 length EXCLUDING stems, restricted to residues present in the structure.
+    # This matches the contact_density definition the classifier was trained on.
     total_cdr3_len = len(
-        [aho for aho in cdr3_all_positions if aho in residues_by_aho]
+        [
+            aho
+            for aho in cdr3_ahos
+            if aho in residues_by_aho and aho not in CDR3_STEM_AHOS
+        ]
     )
     contact_density = (
         float(num_contacts) / float(total_cdr3_len)
