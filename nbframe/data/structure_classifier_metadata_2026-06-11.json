@@ -1,0 +1,63 @@
+{
+  "model_file": "structure_classifier_pipeline_2026-06-11.joblib",
+  "date_trained": "2026-06-11",
+  "feature_cols": [
+    "cos_alpha_N",
+    "tau_N",
+    "cos_alpha_C",
+    "tau_C",
+    "contact_density",
+    "fr2_rsa_key"
+  ],
+  "label_mapping": {
+    "kinked": 1,
+    "extended": 0
+  },
+  "train_csv": "structures_for_labeling_dedup.csv",
+  "feature_engineering": {
+    "version": "0.2.0",
+    "dihedral_encoding": {
+      "type": "cosine",
+      "applies_to": [
+        "alpha_N",
+        "alpha_C"
+      ],
+      "formula": "cos_alpha = cos(radians(alpha))",
+      "note": "CDR3 dihedrals alpha_N/alpha_C are encoded as cos(angle) instead of raw degrees. Raw degrees are unstable near the +/-180 branch cut (a ~2 deg geometric change flips the sign and the linear model overreacts); cos() is wraparound-safe and captures the trans/gauche character. tau_N/tau_C are bounded bond angles and are kept linear."
+    },
+    "contact_density": {
+      "type": "soft_logistic",
+      "switch_midpoint": 4.5,
+      "switch_width": 0.4,
+      "formula": "contact_weight(d) = 1 / (1 + exp((d - midpoint) / width))",
+      "normalization": "sum of pair contact weights / non-stem CDR3 length present"
+    }
+  },
+  "confidence_thresholds": {
+    "kinked_threshold": 0.55,
+    "extended_threshold": 0.25
+  },
+  "performance": {
+    "cv_roc_auc": 0.9700000000000001,
+    "cv_accuracy": 0.92,
+    "cv_precision": 0.9,
+    "cv_recall": 0.9,
+    "cv_f1": 0.9,
+    "test_roc_auc": 0.991919191919192,
+    "test_accuracy": 0.94,
+    "unseen_roc_auc": 0.9923175416133163,
+    "unseen_accuracy": 0.9304347826086956,
+    "n_labeled": 100,
+    "n_kinked_labeled": 40,
+    "n_extended_labeled": 60
+  },
+  "coefficients": {
+    "cos_alpha_N": 0.5387334967197385,
+    "tau_N": 0.4439252035092798,
+    "cos_alpha_C": 0.9997288662503805,
+    "tau_C": -0.5198231078590285,
+    "contact_density": 1.5020032837848902,
+    "fr2_rsa_key": -1.245167503044477
+  },
+  "intercept": -0.5831938959228445
+}

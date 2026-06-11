@@ -18,6 +18,7 @@ Supports both PDB and mmCIF file formats.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, TypedDict
 
@@ -33,6 +34,8 @@ from .structure_config import (
     CDR3_N_BREAK_AHO,
     CDR3_STEM_AHOS,
     CONTACT_RADIUS,
+    CONTACT_SWITCH_WIDTH,
+    USE_SOFT_CONTACTS,
     FR2_CONTACT_AHOS,
     FR2_KEY_RSA_AHOS,
     FR_ALIGNMENT_AHOS,
@@ -187,6 +190,8 @@ class StructureFeatureDict(TypedDict, total=False):
     tau_N: Optional[float]
     alpha_C: Optional[float]
     tau_C: Optional[float]
+    cos_alpha_N: Optional[float]
+    cos_alpha_C: Optional[float]
     contact_density: float
     fr2_rsa_key: Optional[float]
     framework_rmsd: Optional[float]
@@ -244,9 +249,98 @@ def compute_n_terminal_angles(chain: Chain) -> Tuple[Optional[float], Optional[f
 # ---------------------------------------------------------------------------
 
 
+def cdr3_fr2_pair_min_distances(
+    residues_by_aho: Dict[int, Residue],
+    cdr3_ahos: Iterable[int],
+) -> Tuple[List[float], int]:
+    """
+    Compute the minimum heavy-atom distance for every CDR3(non-stem)–FR2 residue pair.
+
+    This is the geometric core shared by both the binary and soft contact
+    density features. Returning raw per-pair minimum distances allows a soft
+    switching function to be applied (or re-applied with different parameters)
+    without re-parsing the structure.
+
+    Parameters
+    ----------
+    residues_by_aho : Dict[int, Residue]
+        Mapping from AHo position to Residue object for the nanobody chain.
+    cdr3_ahos : Iterable[int]
+        AHo positions belonging to CDR3 (including stems).
+
+    Returns
+    -------
+    (min_distances, cdr3_len_nonstem)
+        ``min_distances`` is a list with one entry per CDR3(non-stem)–FR2
+        residue pair where both residues are present (each entry is the minimum
+        heavy-atom distance in Angstroms). ``cdr3_len_nonstem`` is the CDR3
+        length EXCLUDING stems, restricted to residues present in the structure
+        (the density denominator). This matches the definition the structure
+        classifier was trained on.
+    """
+    fr2_positions = FR2_CONTACT_AHOS
+    # For contact counting, exclude stems (they're structurally constrained)
+    cdr3_contact_positions = [aho for aho in cdr3_ahos if aho not in CDR3_STEM_AHOS]
+
+    min_distances: List[float] = []
+
+    for cdr3_aho in cdr3_contact_positions:
+        cdr3_res = residues_by_aho.get(cdr3_aho)
+        if cdr3_res is None:
+            continue
+        cdr3_heavy = [a for a in cdr3_res if not a.name.startswith("H")]
+        if not cdr3_heavy:
+            continue
+
+        for fr_aho in fr2_positions:
+            fr_res = residues_by_aho.get(fr_aho)
+            if fr_res is None:
+                continue
+            fr_heavy = [a for a in fr_res if not a.name.startswith("H")]
+            if not fr_heavy:
+                continue
+
+            pair_min = min(
+                cdr3_atom - fr_atom
+                for cdr3_atom in cdr3_heavy
+                for fr_atom in fr_heavy
+            )
+            min_distances.append(float(pair_min))
+
+    # Denominator: CDR3 length EXCLUDING stems, restricted to residues present.
+    # This matches the contact_density definition used to train the classifier.
+    cdr3_len_nonstem = len(
+        [
+            aho
+            for aho in cdr3_ahos
+            if aho in residues_by_aho and aho not in CDR3_STEM_AHOS
+        ]
+    )
+    return min_distances, cdr3_len_nonstem
+
+
+def _logistic_contact_weight(distance: float, midpoint: float, width: float) -> float:
+    """Smooth switching function mapping a distance to a contact weight in (0, 1).
+
+    Returns ~1 when atoms are much closer than ``midpoint`` and ~0 when much
+    farther, transitioning smoothly through 0.5 at ``distance == midpoint``.
+    ``width`` controls the sharpness of the transition (smaller = sharper).
+    """
+    z = (distance - midpoint) / width
+    if z > 50.0:
+        return 0.0
+    if z < -50.0:
+        return 1.0
+    return 1.0 / (1.0 + math.exp(z))
+
+
 def compute_cdr3_fr2_contacts(
     residues_by_aho: Dict[int, Residue],
     cdr3_ahos: Iterable[int],
+    *,
+    soft: bool = False,
+    switch_midpoint: float = CONTACT_RADIUS,
+    switch_width: float = CONTACT_SWITCH_WIDTH,
 ) -> float:
     """
     Compute CDR3–FR2 contact density feature.
@@ -258,12 +352,21 @@ def compute_cdr3_fr2_contacts(
         num_contacts / cdr3_length_nonstem
 
     Where:
-        - num_contacts: Number of CDR3-FR2 contacts, counted from CDR3 positions
-          EXCLUDING stems (108, 109, 136, 137, 138) since stems are structurally
-          constrained and don't contribute to the kinked/extended distinction.
+        - num_contacts: contacts counted over CDR3 positions EXCLUDING stems
+          (108, 109, 136, 137, 138), which are structurally constrained and
+          don't contribute to the kinked/extended distinction.
         - cdr3_length_nonstem: CDR3 length EXCLUDING stems, restricted to
-          residues present in the structure. This matches the contact_density
-          definition the structure classifier was trained on.
+          residues present in the structure. This matches the definition the
+          classifier was trained on.
+
+    Two contact definitions are supported:
+        - ``soft=False`` (default): a residue pair counts as 1 contact when its
+          minimum heavy-atom distance is <= ``switch_midpoint``. This reproduces
+          the original hard-cutoff behaviour exactly.
+        - ``soft=True``: each residue pair contributes a fractional contact given
+          by a logistic switching function of its minimum heavy-atom distance.
+          This removes the discontinuity at the cutoff and makes the feature
+          robust to small coordinate changes (e.g. MD/ensemble jitter).
 
     Parameters
     ----------
@@ -271,65 +374,35 @@ def compute_cdr3_fr2_contacts(
         Mapping from AHo position to Residue object for the nanobody chain.
     cdr3_ahos : Iterable[int]
         AHo positions belonging to CDR3 (including stems).
+    soft : bool, default False
+        If True, use the logistic soft-contact definition.
+    switch_midpoint : float, default CONTACT_RADIUS
+        Distance (Angstroms) at which a pair counts as half a contact (soft) or
+        the hard cutoff (binary).
+    switch_width : float, default CONTACT_SWITCH_WIDTH
+        Width (Angstroms) of the logistic transition (only used when soft=True).
 
     Returns
     -------
     float
-        Contact density (num_contacts / total_cdr3_length).
+        Contact density (sum of contacts / cdr3_length_nonstem).
     """
-    # Define regions
-    fr2_positions = FR2_CONTACT_AHOS
-    # For contact counting, exclude stems (they're structurally constrained)
-    cdr3_contact_positions = [aho for aho in cdr3_ahos if aho not in CDR3_STEM_AHOS]
-
-    num_contacts = 0
-    contacts_found = set()  # type: ignore[var-annotated]
-
-    for cdr3_aho in cdr3_contact_positions:
-        cdr3_res = residues_by_aho.get(cdr3_aho)
-        if cdr3_res is None:
-            continue
-
-        for fr_aho in fr2_positions:
-            fr_res = residues_by_aho.get(fr_aho)
-            if fr_res is None:
-                continue
-
-            contact_pair = (cdr3_aho, fr_aho)
-            if contact_pair in contacts_found:
-                continue
-
-            is_contact = False
-            for cdr3_atom in cdr3_res:
-                if cdr3_atom.name.startswith("H"):
-                    continue
-                for fr_atom in fr_res:
-                    if fr_atom.name.startswith("H"):
-                        continue
-                    if cdr3_atom - fr_atom <= CONTACT_RADIUS:
-                        is_contact = True
-                        contacts_found.add(contact_pair)
-                        num_contacts += 1
-                        break
-                if is_contact:
-                    break
-
-    # CDR3 length EXCLUDING stems, restricted to residues present in the structure.
-    # This matches the contact_density definition the classifier was trained on.
-    total_cdr3_len = len(
-        [
-            aho
-            for aho in cdr3_ahos
-            if aho in residues_by_aho and aho not in CDR3_STEM_AHOS
-        ]
-    )
-    contact_density = (
-        float(num_contacts) / float(total_cdr3_len)
-        if total_cdr3_len > 0
-        else 0.0
+    min_distances, total_cdr3_len = cdr3_fr2_pair_min_distances(
+        residues_by_aho, cdr3_ahos
     )
 
-    return contact_density
+    if total_cdr3_len <= 0:
+        return 0.0
+
+    if soft:
+        num_contacts = sum(
+            _logistic_contact_weight(d, switch_midpoint, switch_width)
+            for d in min_distances
+        )
+    else:
+        num_contacts = float(sum(1 for d in min_distances if d <= switch_midpoint))
+
+    return float(num_contacts) / float(total_cdr3_len)
 
 
 # ---------------------------------------------------------------------------
@@ -605,11 +678,27 @@ def compute_structure_features(
     alpha_C, tau_C = compute_c_terminal_angles(chain)
     alpha_N, tau_N = compute_n_terminal_angles(chain)
 
-    # Contacts
-    contact_density = compute_cdr3_fr2_contacts(residues_by_aho, CDR3_AHOS)
+    # Contacts (soft logistic switch by default in v0.2.0+; see structure_config)
+    contact_density = compute_cdr3_fr2_contacts(
+        residues_by_aho,
+        CDR3_AHOS,
+        soft=USE_SOFT_CONTACTS,
+        switch_midpoint=CONTACT_RADIUS,
+        switch_width=CONTACT_SWITCH_WIDTH,
+    )
 
     # FR2 RSA
     fr2_rsa_key = compute_fr2_rsa(structure, chain_id)
+
+    # Circular (cosine) encoding of the CDR3 dihedrals (v0.2.0+). alpha_N/alpha_C
+    # are dihedral angles in (-180, 180]; feeding raw degrees to the linear model
+    # is unstable when the angle sits near the +/-180 branch cut (a ~2 deg change
+    # flips +179 <-> -179, i.e. a 358 deg jump). cos() is wraparound-safe and
+    # captures the physically meaningful trans/gauche character. tau_N/tau_C are
+    # bounded bond angles (no wrap) and are kept linear. The deployed classifier
+    # is trained on these cosine features (see metadata feature_cols).
+    cos_alpha_N = math.cos(math.radians(alpha_N)) if alpha_N is not None else None
+    cos_alpha_C = math.cos(math.radians(alpha_C)) if alpha_C is not None else None
 
     # Note: CDR lengths are NOT included - use compute_cdr2_length/compute_cdr3_length
     # directly if needed for descriptive statistics
@@ -619,6 +708,8 @@ def compute_structure_features(
         "tau_N": tau_N,
         "alpha_C": alpha_C,
         "tau_C": tau_C,
+        "cos_alpha_N": cos_alpha_N,
+        "cos_alpha_C": cos_alpha_C,
         "contact_density": contact_density,
         "fr2_rsa_key": fr2_rsa_key,
     }
@@ -635,6 +726,7 @@ __all__ = [
     "compute_c_terminal_angles",
     "compute_n_terminal_angles",
     "compute_cdr3_fr2_contacts",
+    "cdr3_fr2_pair_min_distances",
     "compute_fr2_rsa",
     # CDR lengths (for descriptive statistics only, NOT in classifier)
     "compute_cdr2_length",

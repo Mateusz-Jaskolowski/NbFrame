@@ -41,8 +41,23 @@ CDR3_C_BREAK_AHO: int = 137  # equivalent to Chothia 100x
 # Contact calculation parameters
 #
 
-# Distance threshold for defining an atom–atom contact (Angstroms)
+# Distance threshold for defining an atom–atom contact (Angstroms).
+# Used as the hard cutoff (binary contacts) and as the logistic midpoint (soft).
 CONTACT_RADIUS: float = 4.5
+
+# Width (Angstroms) of the logistic switching function used for SOFT contacts.
+# Smaller = sharper transition (closer to the hard cutoff); larger = smoother
+# and more robust to coordinate jitter, at the cost of K/E discrimination.
+# Tuned jointly on K/E separation and MD/ensemble robustness.
+CONTACT_SWITCH_WIDTH: float = 0.4
+
+# Use the soft (logistic) contact density at runtime (v0.2.0+). When True, the
+# CDR3-FR2 contact density feature uses a logistic switching function instead of
+# the hard CONTACT_RADIUS cutoff, making the feature continuous and robust to
+# small coordinate changes (MD/ensemble jitter). The deployed classifier is
+# trained to match this definition; set to False only to reproduce the legacy
+# v0.1.1 binary-contact behaviour.
+USE_SOFT_CONTACTS: bool = True
 
 #
 # Framework RMSD quality control
@@ -86,7 +101,7 @@ MIN_FRAMEWORK_COVERAGE: float = 0.8
 REFERENCE_VHH_PDB: str = "data/reference_VHH_PDB-2p45-chainB.pdb"
 
 # Path to structure classifier metadata (relative to nbframe package data directory)
-STRUCT_METADATA_PKG_PATH: str = "data/structure_classifier_metadata_2026-01-19.json"
+STRUCT_METADATA_PKG_PATH: str = "data/structure_classifier_metadata_2026-06-11.json"
 
 #
 # SASA / RSASA configuration
@@ -127,6 +142,8 @@ __all__ = [
     "CDR3_N_BREAK_AHO",
     "CDR3_C_BREAK_AHO",
     "CONTACT_RADIUS",
+    "CONTACT_SWITCH_WIDTH",
+    "USE_SOFT_CONTACTS",
     "MAX_SASA_VALUES",
     "FR_ALIGNMENT_AHOS",
     "DEFAULT_RMSD_THRESHOLD",

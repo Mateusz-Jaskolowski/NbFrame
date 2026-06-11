@@ -51,16 +51,18 @@ Generated with `nbframe classify-structure -p nanobody.pdb --output-json result.
   "prob_extended": 0.05,
   "probabilities": {"kinked": 0.95, "extended": 0.05},
   "features": {
-    "alpha_N": 1.23,
-    "tau_N": 0.45,
-    "alpha_C": -2.10,
-    "tau_C": 1.85,
+    "alpha_N": 169.2,
+    "tau_N": 107.8,
+    "alpha_C": 46.8,
+    "tau_C": 104.0,
+    "cos_alpha_N": -0.982,
+    "cos_alpha_C": 0.685,
     "contact_density": 0.42,
     "fr2_rsa_key": 0.31
   },
   "model_info": {
-    "model_file": "structure_classifier_pipeline_2026-01-19.joblib",
-    "date_trained": "2026-01-19",
+    "model_file": "structure_classifier_pipeline_2026-06-11.joblib",
+    "date_trained": "2026-06-11",
     "thresholds": {"kinked": 0.55, "extended": 0.25}
   },
   "warnings": []

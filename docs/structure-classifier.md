@@ -104,8 +104,8 @@ Thresholds can be adjusted via `--kinked-threshold` and `--extended-threshold` o
 ## Performance
 
 - **Model**: Logistic Regression with 6 structural features
-- **Features**: α_N, τ_N, α_C, τ_C, contact density, FR2 RSA
-- **Test Performance**: ROC-AUC 0.994, AP 0.995, Accuracy 94.0%
+- **Features**: cos(α_N), τ_N, cos(α_C), τ_C, contact density, FR2 RSA
+- **Test Performance**: ROC-AUC 0.992, Accuracy 94.0% (5-fold CV ROC-AUC 0.970)
 
 ---
 
@@ -115,12 +115,53 @@ The classifier uses six features computed from AHo-numbered structures:
 
 | Feature | Description |
 |---------|-------------|
-| α_N | Dihedral angle at CDR3 N-terminus |
+| cos(α_N) | Cosine of the CDR3 N-terminal dihedral |
 | τ_N | Bond angle at CDR3 N-terminus |
-| α_C | Dihedral angle at CDR3 C-terminus |
+| cos(α_C) | Cosine of the CDR3 C-terminal dihedral |
 | τ_C | Bond angle at CDR3 C-terminus |
-| contact_density | CDR3–FR2 contact density |
+| contact_density | CDR3–FR2 soft (logistic) contact density |
 | fr2_rsa_key | FR2 key residue solvent accessibility |
+
+The raw dihedral angles `alpha_N` and `alpha_C` are still reported in the output
+features for interpretability; the classifier consumes their cosines (see below).
+
+### Contact density (soft contacts, v0.2.0)
+
+`contact_density` summarises how tightly CDR3 packs against framework region 2
+(FR2). For each CDR3 non-stem residue and each FR2 residue (AHo 44–55), the
+minimum heavy-atom distance `d` is mapped to a contact weight via a logistic
+switching function and summed, then normalised by the number of non-stem CDR3
+residues present:
+
+```
+contact_weight(d) = 1 / (1 + exp((d - 4.5) / 0.4))
+contact_density   = Σ contact_weight(d) / (non-stem CDR3 length present)
+```
+
+The midpoint (4.5 Å) matches the legacy hard cutoff, and the 0.4 Å width gives a
+10–90% transition over roughly 3.6–5.4 Å. Replacing the original hard 4.5 Å step
+with this smooth switch removes the discontinuity that caused single-frame label
+flips when a contact drifted across the cutoff in MD/ensembles, while slightly
+improving K/E discrimination. The classifier is trained to match this definition.
+To reproduce the legacy v0.1.1 binary-contact behaviour, set
+`USE_SOFT_CONTACTS = False` in `nbframe.structure_config`.
+
+### Dihedral encoding (cosine, v0.2.0)
+
+`alpha_N` and `alpha_C` are *dihedral* angles in (−180°, 180°]. Feeding raw
+degrees to a linear model is unstable near the ±180° branch cut: a ~2° geometric
+change can flip the value between +179° and −179° (a 358° jump), which the model
+misreads as a large conformational change. This caused spurious kinked/extended
+flips across MD frames and X-ray refinement ensembles, and — because a large
+fraction of structures sit near the cut — it even degraded training.
+
+v0.2.0 therefore feeds the classifier `cos(alpha_N)` and `cos(alpha_C)` instead
+of raw degrees. The cosine is wraparound-safe (cos(+179°) ≈ cos(−179°)) and
+captures the physically meaningful trans/gauche character of the dihedral. The
+bond angles `tau_N` and `tau_C` are bounded in [0°, 180°] with no wraparound and
+are kept linear. This change improves 5-fold CV (ROC-AUC 0.962 → 0.970, recall
+0.83 → 0.90) and substantially stabilises MD/ensemble predictions, with only a
+marginal change on held-out crystal structures.
 
 ---
 
