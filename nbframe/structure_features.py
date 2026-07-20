@@ -193,6 +193,7 @@ class StructureFeatureDict(TypedDict, total=False):
     cos_alpha_N: Optional[float]
     cos_alpha_C: Optional[float]
     contact_density: float
+    contact_nres: float
     fr2_rsa_key: Optional[float]
     framework_rmsd: Optional[float]
     # CDR lengths - available via compute_cdr2_length/compute_cdr3_length
@@ -317,6 +318,103 @@ def cdr3_fr2_pair_min_distances(
         ]
     )
     return min_distances, cdr3_len_nonstem
+
+
+def cdr3_fr2_residue_min_distances(
+    residues_by_aho: Dict[int, Residue],
+    cdr3_ahos: Iterable[int],
+) -> Dict[int, float]:
+    """
+    For each non-stem CDR3 residue, the minimum heavy-atom distance to FR2.
+
+    Unlike :func:`cdr3_fr2_pair_min_distances` (which returns one entry per
+    CDR3-FR2 residue *pair*), this collapses to one entry per CDR3 residue: the
+    closest approach of that residue to *any* FR2 contact residue. This is the
+    geometric core of the ``contact_nres`` feature (number of CDR3 residues that
+    contact FR2), which - unlike the length-normalised ``contact_density`` - is
+    not diluted by loop length and so faithfully captures the expert definition
+    "any part of CDR3 contacting FR2 implies kinked".
+
+    Returns
+    -------
+    Dict[int, float]
+        Mapping ``{cdr3_aho: min_heavy_atom_distance_to_FR2}`` for non-stem CDR3
+        residues that are present and have at least one FR2 partner present.
+    """
+    fr2_residues = [
+        residues_by_aho[aho] for aho in FR2_CONTACT_AHOS if aho in residues_by_aho
+    ]
+    fr2_heavy_by_res = [
+        [a for a in res if not a.name.startswith("H")] for res in fr2_residues
+    ]
+    fr2_heavy_by_res = [atoms for atoms in fr2_heavy_by_res if atoms]
+
+    res_min: Dict[int, float] = {}
+    if not fr2_heavy_by_res:
+        return res_min
+
+    cdr3_contact_positions = [aho for aho in cdr3_ahos if aho not in CDR3_STEM_AHOS]
+    for cdr3_aho in cdr3_contact_positions:
+        cdr3_res = residues_by_aho.get(cdr3_aho)
+        if cdr3_res is None:
+            continue
+        cdr3_heavy = [a for a in cdr3_res if not a.name.startswith("H")]
+        if not cdr3_heavy:
+            continue
+        best: Optional[float] = None
+        for fr_heavy in fr2_heavy_by_res:
+            pair_min = min(
+                cdr3_atom - fr_atom
+                for cdr3_atom in cdr3_heavy
+                for fr_atom in fr_heavy
+            )
+            if best is None or pair_min < best:
+                best = float(pair_min)
+        if best is not None:
+            res_min[cdr3_aho] = best
+    return res_min
+
+
+def compute_cdr3_fr2_contact_nres(
+    residues_by_aho: Dict[int, Residue],
+    cdr3_ahos: Iterable[int],
+    *,
+    soft: bool = True,
+    switch_midpoint: float = CONTACT_RADIUS,
+    switch_width: float = CONTACT_SWITCH_WIDTH,
+) -> float:
+    """
+    Number of CDR3 residues in contact with FR2 (the ``contact_nres`` feature).
+
+    Each non-stem CDR3 residue contributes based on its single closest approach
+    to FR2:
+        - ``soft=True`` (default): a fractional contribution given by the same
+          logistic switch used for soft contacts, so the count is continuous and
+          robust to small coordinate changes (MD/ensemble jitter).
+        - ``soft=False``: an integer count of residues whose closest FR2 approach
+          is within ``switch_midpoint``.
+
+    This is NOT normalised by loop length. A localised contact (e.g. a single
+    side chain reaching FR2 in an otherwise extended loop) therefore registers
+    fully, which matches the expert kinked/extended definition far better than
+    the length-averaged ``contact_density`` (see v0.3.0 model notes).
+
+    Returns
+    -------
+    float
+        Soft (or integer) count of contacting CDR3 residues.
+    """
+    res_min = cdr3_fr2_residue_min_distances(residues_by_aho, cdr3_ahos)
+    if not res_min:
+        return 0.0
+    if soft:
+        return float(
+            sum(
+                _logistic_contact_weight(d, switch_midpoint, switch_width)
+                for d in res_min.values()
+            )
+        )
+    return float(sum(1 for d in res_min.values() if d <= switch_midpoint))
 
 
 def _logistic_contact_weight(distance: float, midpoint: float, width: float) -> float:
@@ -466,7 +564,8 @@ def compute_fr2_rsa(
     Returns
     -------
     float or None
-        RSA over AHo positions 44 and 54 together (fr2_rsa_key).
+        RSA over the FR2 key position(s) in ``FR2_KEY_RSA_AHOS``
+        (AHo 44 as of v0.3.0; was 44 + 54 in v0.2.0) -> ``fr2_rsa_key``.
     """
     return _compute_region_rsa(structure, chain_id, FR2_KEY_RSA_AHOS)
 
@@ -687,7 +786,18 @@ def compute_structure_features(
         switch_width=CONTACT_SWITCH_WIDTH,
     )
 
-    # FR2 RSA
+    # Number of CDR3 residues contacting FR2 (v0.3.0 classifier feature). Unlike
+    # contact_density this is NOT normalised by loop length, so a localised
+    # contact in a long loop is not diluted - matching the expert definition.
+    contact_nres = compute_cdr3_fr2_contact_nres(
+        residues_by_aho,
+        CDR3_AHOS,
+        soft=USE_SOFT_CONTACTS,
+        switch_midpoint=CONTACT_RADIUS,
+        switch_width=CONTACT_SWITCH_WIDTH,
+    )
+
+    # FR2 RSA (v0.3.0: key position 44 only; see structure_config.FR2_KEY_RSA_AHOS)
     fr2_rsa_key = compute_fr2_rsa(structure, chain_id)
 
     # Circular (cosine) encoding of the CDR3 dihedrals (v0.2.0+). alpha_N/alpha_C
@@ -711,6 +821,7 @@ def compute_structure_features(
         "cos_alpha_N": cos_alpha_N,
         "cos_alpha_C": cos_alpha_C,
         "contact_density": contact_density,
+        "contact_nres": contact_nres,
         "fr2_rsa_key": fr2_rsa_key,
     }
 
@@ -726,7 +837,9 @@ __all__ = [
     "compute_c_terminal_angles",
     "compute_n_terminal_angles",
     "compute_cdr3_fr2_contacts",
+    "compute_cdr3_fr2_contact_nres",
     "cdr3_fr2_pair_min_distances",
+    "cdr3_fr2_residue_min_distances",
     "compute_fr2_rsa",
     # CDR lengths (for descriptive statistics only, NOT in classifier)
     "compute_cdr2_length",

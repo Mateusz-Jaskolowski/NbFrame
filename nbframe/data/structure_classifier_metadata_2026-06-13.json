@@ -1,0 +1,77 @@
+{
+  "model_file": "structure_classifier_pipeline_2026-06-13.joblib",
+  "date_trained": "2026-06-13",
+  "feature_cols": [
+    "cos_alpha_N",
+    "tau_N",
+    "cos_alpha_C",
+    "tau_C",
+    "contact_nres",
+    "fr2_rsa_key"
+  ],
+  "label_mapping": {
+    "kinked": 1,
+    "extended": 0
+  },
+  "train_csv": "structures_for_labeling_dedup.csv + expert_flip_labels_2026-06-12.csv",
+  "feature_engineering": {
+    "version": "0.3.0",
+    "dihedral_encoding": {
+      "type": "cosine",
+      "applies_to": [
+        "alpha_N",
+        "alpha_C"
+      ],
+      "formula": "cos_alpha = cos(radians(alpha))",
+      "note": "CDR3 dihedrals alpha_N/alpha_C are encoded as cos(angle); wraparound-safe near the +/-180 branch cut. tau_N/tau_C are bounded bond angles and stay linear. (Unchanged from v0.2.0.)"
+    },
+    "contact_nres": {
+      "type": "soft_logistic_residue_count",
+      "switch_midpoint": 4.5,
+      "switch_width": 0.4,
+      "formula": "sum over non-stem CDR3 residues of 1/(1+exp((d_min_to_FR2 - midpoint)/width))",
+      "note": "Number of CDR3 residues contacting FR2 (soft-weighted by each residue's closest approach to any FR2 contact residue, AHo 44-55). Replaces v0.2.0 contact_density: NOT normalised by loop length, so a localised contact in a long, otherwise-extended loop registers fully - matching the expert 'any CDR3-FR2 contact => kinked' rule."
+    },
+    "fr2_rsa_key": {
+      "positions_aho": [
+        44
+      ],
+      "note": "Relative SASA at FR2 AHo position 44 only (v0.2.0 used 44+54). Position 44 carries almost all the RSA signal; 54 was near-noise and diluted the feature."
+    },
+    "changes_vs_v0.2.0": [
+      "contact_density -> contact_nres (length-independent contact count)",
+      "fr2_rsa_key positions 44+54 -> 44",
+      "training data 100 -> 100 + 46 expert (contamination-free) labels"
+    ]
+  },
+  "confidence_thresholds": {
+    "kinked_threshold": 0.55,
+    "extended_threshold": 0.25
+  },
+  "performance": {
+    "cv_roc_auc": 0.9234154929577465,
+    "cv_accuracy": 0.8592592592592593,
+    "cv_precision": 0.8571428571428571,
+    "cv_recall": 0.84375,
+    "cv_f1": 0.8503937007874016,
+    "heldout_roc_auc": 0.9967141292442497,
+    "heldout_accuracy": 0.9782608695652174,
+    "n_heldout": 138,
+    "expert46_loo_roc_auc": 0.7575757575757576,
+    "expert46_loo_accuracy": 0.7142857142857143,
+    "n_expert_clear": 35,
+    "n_labeled": 135,
+    "n_kinked_labeled": 64,
+    "n_extended_labeled": 71,
+    "note": "heldout = unique test\u222aunseen minus train and all 46 expert structures (the original test/unseen splits overlap by 73, so are collapsed)."
+  },
+  "coefficients": {
+    "cos_alpha_N": 0.32082788391157196,
+    "tau_N": 0.2849005805022629,
+    "cos_alpha_C": 0.5459544222987588,
+    "tau_C": -0.19817612664622028,
+    "contact_nres": 2.16638454890592,
+    "fr2_rsa_key": -0.7896906624911074
+  },
+  "intercept": 0.20604762341274865
+}

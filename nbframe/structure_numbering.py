@@ -984,6 +984,7 @@ def compute_features_for_pdb_directory(
                 "alpha_C",
                 "tau_C",
                 "contact_density",
+                "contact_nres",
                 "fr2_rsa_key",
                 "framework_rmsd",
             ]
@@ -1091,6 +1092,7 @@ def compute_features_for_pdb_directory(
         "alpha_C",
         "tau_C",
         "contact_density",
+        "contact_nres",
         "fr2_rsa_key",
         "framework_rmsd",
     ]

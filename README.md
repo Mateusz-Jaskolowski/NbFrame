@@ -73,6 +73,7 @@ nbframe classify-structure -d pdb_folder/ --output-csv results.csv
 | Understand output CSV / JSON files | [Output Formats](docs/output-formats.md) |
 | Use NbFrame from Python | [Sequence API](docs/sequence-classifier.md#python-api) / [Structure API](docs/structure-classifier.md#python-api) |
 | Tune batch processing for large datasets | [Batch Tuning](docs/sequence-classifier.md#batch-size-recommendations) |
+| See what changed between releases | [Changelog](CHANGELOG.md) |
 
 ## Citation
 

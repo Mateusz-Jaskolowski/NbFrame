@@ -18,7 +18,11 @@ from typing import Dict, List
 FR2_CONTACT_AHOS: List[int] = list(range(44, 56))  # 44–55 inclusive
 
 # FR2 key RSA feature is computed over these positions together (AHo numbering).
-FR2_KEY_RSA_AHOS: List[int] = [44, 54]
+# v0.3.0: narrowed to AHo 44 only. A feature bake-off against expert labels showed
+# position 44 (a VHH hallmark FR2 residue) carries almost all of the RSA signal,
+# while AHo 54 was near-uninformative and diluted the feature (AUC 44-only > 44+54
+# > whole-FR2 on both the expert set and the original benchmark).
+FR2_KEY_RSA_AHOS: List[int] = [44]
 
 # CDR2 region (AHo numbering)
 # Used for CDR2 length calculation (descriptive statistics only).
@@ -101,7 +105,7 @@ MIN_FRAMEWORK_COVERAGE: float = 0.8
 REFERENCE_VHH_PDB: str = "data/reference_VHH_PDB-2p45-chainB.pdb"
 
 # Path to structure classifier metadata (relative to nbframe package data directory)
-STRUCT_METADATA_PKG_PATH: str = "data/structure_classifier_metadata_2026-06-11.json"
+STRUCT_METADATA_PKG_PATH: str = "data/structure_classifier_metadata_2026-06-13.json"
 
 #
 # SASA / RSASA configuration

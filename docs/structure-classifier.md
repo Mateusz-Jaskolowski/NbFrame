@@ -104,8 +104,13 @@ Thresholds can be adjusted via `--kinked-threshold` and `--extended-threshold` o
 ## Performance
 
 - **Model**: Logistic Regression with 6 structural features
-- **Features**: cos(α_N), τ_N, cos(α_C), τ_C, contact density, FR2 RSA
-- **Test Performance**: ROC-AUC 0.992, Accuracy 94.0% (5-fold CV ROC-AUC 0.970)
+- **Features**: cos(α_N), τ_N, cos(α_C), τ_C, contact_nres, FR2 RSA(44)
+- **Training data**: 100 original expert labels + 46 additional expert labels
+  (146 structures; 135 with a clear kinked/extended call)
+- **Performance (v0.3.0)**: held-out pool (138 structures, no overlap with
+  training) ROC-AUC 0.997, Accuracy 97.8%; 5-fold CV on the training set
+  ROC-AUC 0.92, Accuracy 0.86 (CV is lower than v0.2.0's because the training
+  set is now enriched with the hardest, most ambiguous cases).
 
 ---
 
@@ -119,32 +124,47 @@ The classifier uses six features computed from AHo-numbered structures:
 | τ_N | Bond angle at CDR3 N-terminus |
 | cos(α_C) | Cosine of the CDR3 C-terminal dihedral |
 | τ_C | Bond angle at CDR3 C-terminus |
-| contact_density | CDR3–FR2 soft (logistic) contact density |
-| fr2_rsa_key | FR2 key residue solvent accessibility |
+| contact_nres | Number of CDR3 residues contacting FR2 (soft, length-independent) |
+| fr2_rsa_key | FR2 key residue (AHo 44) solvent accessibility |
 
 The raw dihedral angles `alpha_N` and `alpha_C` are still reported in the output
 features for interpretability; the classifier consumes their cosines (see below).
+The legacy length-normalised `contact_density` is also still reported in the
+output features, but the v0.3.0 classifier consumes `contact_nres` instead.
 
-### Contact density (soft contacts, v0.2.0)
+### Contact count (`contact_nres`, v0.3.0)
 
-`contact_density` summarises how tightly CDR3 packs against framework region 2
-(FR2). For each CDR3 non-stem residue and each FR2 residue (AHo 44–55), the
-minimum heavy-atom distance `d` is mapped to a contact weight via a logistic
-switching function and summed, then normalised by the number of non-stem CDR3
-residues present:
+`contact_nres` counts **how many CDR3 residues touch framework region 2 (FR2)**.
+For each non-stem CDR3 residue we take its single closest heavy-atom approach to
+any FR2 contact residue (AHo 44–55) and map it through the same logistic switch
+used for soft contacts, then sum over CDR3 residues:
 
 ```
 contact_weight(d) = 1 / (1 + exp((d - 4.5) / 0.4))
-contact_density   = Σ contact_weight(d) / (non-stem CDR3 length present)
+contact_nres      = Σ_residues  contact_weight( min distance of that residue to FR2 )
 ```
 
-The midpoint (4.5 Å) matches the legacy hard cutoff, and the 0.4 Å width gives a
-10–90% transition over roughly 3.6–5.4 Å. Replacing the original hard 4.5 Å step
-with this smooth switch removes the discontinuity that caused single-frame label
-flips when a contact drifted across the cutoff in MD/ensembles, while slightly
-improving K/E discrimination. The classifier is trained to match this definition.
-To reproduce the legacy v0.1.1 binary-contact behaviour, set
-`USE_SOFT_CONTACTS = False` in `nbframe.structure_config`.
+Crucially this is **not** normalised by loop length. The expert definition of a
+kinked conformation is "any part of CDR3 contacting FR2" — even a single side
+chain reaching across in an otherwise extended loop. The v0.2.0 feature
+`contact_density` divided the contact sum by CDR3 length, which diluted exactly
+these localised contacts in long loops and caused such structures to be called
+extended. Against a contamination-free set of 46 expert labels, `contact_nres`
+separated kinked from extended markedly better than `contact_density`
+(univariate ROC-AUC ≈ 0.95 vs ≈ 0.91), which is the main driver of the v0.3.0
+improvement. The soft (logistic) weighting keeps the count continuous and robust
+to small coordinate changes across MD frames and refinement ensembles. To
+reproduce the legacy binary-contact behaviour, set `USE_SOFT_CONTACTS = False`
+in `nbframe.structure_config`.
+
+### FR2 RSA at position 44 (v0.3.0)
+
+`fr2_rsa_key` is the relative solvent accessibility of the FR2 hallmark
+residue(s) in `FR2_KEY_RSA_AHOS`. In v0.3.0 this is narrowed to **AHo position 44
+only** (v0.2.0 used 44 + 54). A feature bake-off against the expert labels showed
+position 44 carries almost all of the RSA signal — when CDR3 folds back onto FR2
+it buries position 44 — while AHo 54 was near-uninformative and only diluted the
+feature.
 
 ### Dihedral encoding (cosine, v0.2.0)
 

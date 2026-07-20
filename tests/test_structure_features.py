@@ -10,6 +10,7 @@ from pathlib import Path
 from nbframe.structure_features import (
     build_residues_by_aho,
     compute_c_terminal_angles,
+    compute_cdr3_fr2_contact_nres,
     compute_fr2_rsa,
     compute_n_terminal_angles,
     compute_structure_features,
@@ -38,6 +39,7 @@ class TestStructureFeaturesSmoke(unittest.TestCase):
         self.assertTrue(callable(compute_n_terminal_angles))
         self.assertTrue(callable(compute_c_terminal_angles))
         self.assertTrue(callable(compute_fr2_rsa))
+        self.assertTrue(callable(compute_cdr3_fr2_contact_nres))
         self.assertTrue(callable(compute_structure_features))
 
 
@@ -94,7 +96,7 @@ class TestStructureFeaturesWithPDBs(unittest.TestCase):
 
             # Verify expected feature keys
             expected_keys = ['alpha_N', 'tau_N', 'alpha_C', 'tau_C',
-                           'contact_density', 'fr2_rsa_key']
+                           'contact_density', 'contact_nres', 'fr2_rsa_key']
             for key in expected_keys:
                 self.assertIn(key, features, f"Missing expected feature: {key}")
 
