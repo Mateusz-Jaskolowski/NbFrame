@@ -23,7 +23,8 @@ nbframe classify-sequence [OPTIONS]
 | `--label/--no-label` | Include/exclude classification label (default: label) |
 | `--align/--no-align` | Perform AHo alignment (disable with `--no-align` for pre-aligned sequences) |
 | `--fix-cdr1/--no-fix-cdr1` | Fix CDR-H1 gaps during alignment (default: fix) |
-| `--batch-size INT` | Number of sequences per alignment batch (default: 100) |
+| `--batch-size INT` | Maximum sequences per alignment/scoring batch; must be positive (default: 100) |
+| `--ncpu INT` | Maximum ANARCI workers per batch; capped by the number of valid records |
 | `--kinked-threshold FLOAT` | Threshold for kinked classification (default: 0.70) |
 | `--extended-threshold FLOAT` | Threshold for extended classification (default: 0.40) |
 
@@ -89,6 +90,7 @@ from nbframe import classify_sequences, predict_from_fasta
 results = classify_sequences(
     ["SEQ1...", "SEQ2...", "SEQ3..."],
     batch_size=1000,
+    ncpu=4,
     verbose=True
 )
 
@@ -132,9 +134,16 @@ Thresholds can be adjusted via `--kinked-threshold` and `--extended-threshold` o
 
 - **Model**: Logistic Regression with 20 hallmark features
 - **Test Performance**: ROC-AUC 0.939, AP 0.956, Accuracy 86.0%
-- **Speed**: ~3.5 million sequences/minute on M3 MacBook Pro (pre-aligned)
+- **Speed**: The earlier pre-aligned benchmark predates the input validation
+  and batching fixes. Throughput for the revised path has not been benchmarked.
 
 ### Batch Size Recommendations
+
+`batch_size` bounds the temporary alignment and feature arrays. The existing
+list/DataFrame APIs still retain the input and all returned results in memory;
+they do not provide a constant-memory streaming interface. Malformed records
+receive individual errors and do not prevent valid records from being scored.
+Failures of HMMER or other required infrastructure still raise errors.
 
 | Dataset Size | Recommended Batch Size |
 |--------------|------------------------|
@@ -146,6 +155,19 @@ Thresholds can be adjusted via `--kinked-threshold` and `--extended-threshold` o
 ### Pre-aligned Sequences
 
 If your sequences are already aligned to the AHo numbering scheme, skip alignment for faster processing:
+
+Pre-aligned input must contain exactly 149 base AHo columns, using amino acid
+letters, `-` for gaps, and optionally `X` for unknown residues. At least 80
+standard residues and 80% of the model's distinct hallmark positions must be
+resolved. `X` and gaps do not count as resolved. These checks validate coverage;
+skipping alignment still assumes that the caller has supplied a VHH alignment.
+
+When NbFrame runs ANARCI, it constructs these columns from the returned position
+labels. An insertion such as 36A does not shift position 37 or any later feature.
+The returned `aligned_sequence` is this 149-column model projection; insertion
+residues remain in `input_sequence` but do not occupy extra model columns. To
+score an insertion-containing sequence without losing its position labels,
+provide the raw sequence with alignment enabled.
 
 ```bash
 nbframe classify-sequence -f aligned.fasta --no-align

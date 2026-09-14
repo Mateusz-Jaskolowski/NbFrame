@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple, TypedDict
+from typing import Dict, Iterable, List, Optional, Tuple, TypedDict, Union
 
 from Bio.PDB import PDBParser, MMCIFParser, ShrakeRupley, vectors
 from Bio.PDB.Chain import Chain
@@ -106,19 +106,70 @@ def get_chain(structure: Structure, chain_id: str) -> Chain:
     return model[chain_id]
 
 
-def build_residues_by_aho(chain: Chain) -> Dict[int, Residue]:
-    """
-    Build a mapping from AHo residue number to Residue object for a chain.
+AhoPosition = Union[int, str]
 
-    Assumes the PDB is already AHo-numbered, so residue.id[1] is the AHo position.
-    Only standard residues (id[0] == ' ') are included.
+
+def _base_aho(position: AhoPosition) -> int:
+    """Base position for region membership, retaining insertion keys elsewhere."""
+    if isinstance(position, int):
+        return position
+    return int(position.rstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"))
+
+
+def build_residues_by_aho(chain: Chain) -> Dict[AhoPosition, Residue]:
+    """Map complete AHo identities to residues: 123, '123A', '123B', etc.
+
+    Uninserted positions retain integer keys for compatibility. No insertion
+    may replace its base residue or another insertion.
     """
-    residues_by_aho: Dict[int, Residue] = {}
+    residues_by_aho = {}
     for residue in chain:
         if residue.id[0] == " ":
-            aho_num = residue.id[1]
-            residues_by_aho[aho_num] = residue
+            _, number, insertion = residue.id
+            insertion = insertion.strip()
+            key = f"{number}{insertion}" if insertion else number
+            residues_by_aho[key] = residue
     return residues_by_aho
+
+
+def _heavy_atoms(residue):
+    """Select by element, falling back to PDB names only when it is unknown."""
+    def is_heavy(atom):
+        element = (atom.element or "").strip().upper()
+        if element not in ("", "X"):
+            return element not in ("H", "D")
+        name = atom.name.strip().upper().lstrip("0123456789")
+        return not name.startswith(("H", "D"))
+    return [atom for atom in residue if is_heavy(atom)]
+
+
+def _compute_terminal_angles(chain, breakpoint):
+    residues = [residue for residue in chain if residue.id[0] == " "]
+    k = next((i for i, residue in enumerate(residues)
+              if residue.id == (" ", breakpoint, " ")), None)
+    if k is None or k < 1 or k + 2 >= len(residues):
+        return None, None
+    segment = residues[k - 1:k + 3]
+    if any("CA" not in residue for residue in segment):
+        return None, None
+    # Consecutive resolved residues need not be covalently adjacent. Confirm
+    # peptide connectivity without imposing consecutive AHo numbers (numbering
+    # gaps are legitimate). Missing peptide atoms cannot establish continuity.
+    for left, right in zip(segment, segment[1:]):
+        if "C" not in left or "N" not in right:
+            return None, None
+        distance = float(left["C"] - right["N"])
+        if not math.isfinite(distance) or not 0.8 <= distance <= 2.0:
+            return None, None
+        ca_distance = float(left["CA"] - right["CA"])
+        if not math.isfinite(ca_distance) or not 2.5 <= ca_distance <= 4.5:
+            return None, None
+    points = [residue["CA"].get_vector() for residue in segment]
+    alpha = math.degrees(float(vectors.calc_dihedral(*points)))
+    tau = math.degrees(float(vectors.calc_angle(*points[:3])))
+    if not math.isfinite(alpha) or not math.isfinite(tau):
+        return None, None
+    return alpha, tau
 
 
 # ---------------------------------------------------------------------------
@@ -137,51 +188,15 @@ def compute_c_terminal_angles(chain: Chain) -> Tuple[Optional[float], Optional[f
         - alpha_C: dihedral(136, 137, 138, 139)
         - tau_C:   angle(136, 137, 138)
     """
-    # Build ordered residue list for the chain
-    list_res: List[Residue] = list(chain.get_residues())
-
-    # Find index of the breakpoint residue by AHo number
-    breakpoint_aho = CDR3_C_BREAK_AHO
-    k: Optional[int] = None
-    for idx, res in enumerate(list_res):
-        res_id = res.get_id()
-        aho_num = res_id[1]
-        if aho_num == breakpoint_aho:
-            k = idx
-            break
-
-    if k is None:
-        return None, None
-
-    # Ensure neighbours exist
-    if not (0 <= k - 1 < len(list_res) and 0 <= k + 2 < len(list_res)):
-        return None, None
-
-    try:
-        v_prev = list_res[k - 1]["CA"].get_vector()
-        v_break = list_res[k]["CA"].get_vector()
-        v_next = list_res[k + 1]["CA"].get_vector()
-        v_next2 = list_res[k + 2]["CA"].get_vector()
-    except KeyError:
-        # Missing CA atom in one of the residues
-        return None, None
-
-    alpha = float(
-        vectors.calc_dihedral(v_prev, v_break, v_next, v_next2) * 180.0 / 3.141592653589793
-    )
-    tau = float(vectors.calc_angle(v_prev, v_break, v_next) * 180.0 / 3.141592653589793)
-
-    return alpha, tau
+    return _compute_terminal_angles(chain, CDR3_C_BREAK_AHO)
 
 
 class StructureFeatureDict(TypedDict, total=False):
     """Features returned by compute_structure_features().
 
-    The 6 core features used by the Structure Classifier:
-    - alpha_N, tau_N: N-terminal CDR3 angles
-    - alpha_C, tau_C: C-terminal CDR3 angles
-    - contact_density: CDR3-FR2 contacts normalized by CDR3 length
-    - fr2_rsa_key: Relative solvent accessibility at FR2 key positions
+    The classifier uses cos_alpha_N, tau_N, cos_alpha_C, tau_C, contact_nres,
+    and fr2_rsa_key. Raw dihedrals and legacy contact_density are also returned
+    for interpretation. High-level numbering APIs add framework_rmsd.
 
     Note: cdr2_length and cdr3_length were tested but NOT included in the
     classifier (see CDR Length Functions section for details).
@@ -200,6 +215,9 @@ class StructureFeatureDict(TypedDict, total=False):
     # but NOT included in classifier features (tested, did not improve model)
 
 
+STRUCTURE_FEATURE_COLUMNS = tuple(StructureFeatureDict.__annotations__)
+
+
 def compute_n_terminal_angles(chain: Chain) -> Tuple[Optional[float], Optional[float]]:
     """
     Compute alpha and tau angles at the N-terminal end of CDR3.
@@ -212,37 +230,7 @@ def compute_n_terminal_angles(chain: Chain) -> Tuple[Optional[float], Optional[f
         - alpha_N: dihedral(107, 108, 109, 110)
         - tau_N:   angle(107, 108, 109)
     """
-    list_res: List[Residue] = list(chain.get_residues())
-
-    breakpoint_aho = CDR3_N_BREAK_AHO
-    k: Optional[int] = None
-    for idx, res in enumerate(list_res):
-        res_id = res.get_id()
-        aho_num = res_id[1]
-        if aho_num == breakpoint_aho:
-            k = idx
-            break
-
-    if k is None:
-        return None, None
-
-    if not (0 <= k - 1 < len(list_res) and 0 <= k + 2 < len(list_res)):
-        return None, None
-
-    try:
-        v_prev = list_res[k - 1]["CA"].get_vector()
-        v_break = list_res[k]["CA"].get_vector()
-        v_next = list_res[k + 1]["CA"].get_vector()
-        v_next2 = list_res[k + 2]["CA"].get_vector()
-    except KeyError:
-        return None, None
-
-    alpha = float(
-        vectors.calc_dihedral(v_prev, v_break, v_next, v_next2) * 180.0 / 3.141592653589793
-    )
-    tau = float(vectors.calc_angle(v_prev, v_break, v_next) * 180.0 / 3.141592653589793)
-
-    return alpha, tau
+    return _compute_terminal_angles(chain, CDR3_N_BREAK_AHO)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +239,7 @@ def compute_n_terminal_angles(chain: Chain) -> Tuple[Optional[float], Optional[f
 
 
 def cdr3_fr2_pair_min_distances(
-    residues_by_aho: Dict[int, Residue],
+    residues_by_aho: Dict[AhoPosition, Residue],
     cdr3_ahos: Iterable[int],
 ) -> Tuple[List[float], int]:
     """
@@ -264,7 +252,7 @@ def cdr3_fr2_pair_min_distances(
 
     Parameters
     ----------
-    residues_by_aho : Dict[int, Residue]
+    residues_by_aho : Dict[AhoPosition, Residue]
         Mapping from AHo position to Residue object for the nanobody chain.
     cdr3_ahos : Iterable[int]
         AHo positions belonging to CDR3 (including stems).
@@ -279,51 +267,25 @@ def cdr3_fr2_pair_min_distances(
         (the density denominator). This matches the definition the structure
         classifier was trained on.
     """
-    fr2_positions = FR2_CONTACT_AHOS
-    # For contact counting, exclude stems (they're structurally constrained)
-    cdr3_contact_positions = [aho for aho in cdr3_ahos if aho not in CDR3_STEM_AHOS]
-
-    min_distances: List[float] = []
-
-    for cdr3_aho in cdr3_contact_positions:
-        cdr3_res = residues_by_aho.get(cdr3_aho)
-        if cdr3_res is None:
+    cdr3_positions = set(cdr3_ahos) - set(CDR3_STEM_AHOS)
+    cdr3 = [residue for pos, residue in residues_by_aho.items() if _base_aho(pos) in cdr3_positions]
+    fr2 = [residue for pos, residue in residues_by_aho.items() if _base_aho(pos) in FR2_CONTACT_AHOS]
+    min_distances = []
+    for residue in cdr3:
+        atoms = _heavy_atoms(residue)
+        if not atoms:
             continue
-        cdr3_heavy = [a for a in cdr3_res if not a.name.startswith("H")]
-        if not cdr3_heavy:
-            continue
-
-        for fr_aho in fr2_positions:
-            fr_res = residues_by_aho.get(fr_aho)
-            if fr_res is None:
-                continue
-            fr_heavy = [a for a in fr_res if not a.name.startswith("H")]
-            if not fr_heavy:
-                continue
-
-            pair_min = min(
-                cdr3_atom - fr_atom
-                for cdr3_atom in cdr3_heavy
-                for fr_atom in fr_heavy
-            )
-            min_distances.append(float(pair_min))
-
-    # Denominator: CDR3 length EXCLUDING stems, restricted to residues present.
-    # This matches the contact_density definition used to train the classifier.
-    cdr3_len_nonstem = len(
-        [
-            aho
-            for aho in cdr3_ahos
-            if aho in residues_by_aho and aho not in CDR3_STEM_AHOS
-        ]
-    )
-    return min_distances, cdr3_len_nonstem
+        for partner in fr2:
+            partner_atoms = _heavy_atoms(partner)
+            if partner_atoms:
+                min_distances.append(float(min(a - b for a in atoms for b in partner_atoms)))
+    return min_distances, len(cdr3)
 
 
 def cdr3_fr2_residue_min_distances(
-    residues_by_aho: Dict[int, Residue],
+    residues_by_aho: Dict[AhoPosition, Residue],
     cdr3_ahos: Iterable[int],
-) -> Dict[int, float]:
+) -> Dict[AhoPosition, float]:
     """
     For each non-stem CDR3 residue, the minimum heavy-atom distance to FR2.
 
@@ -341,42 +303,23 @@ def cdr3_fr2_residue_min_distances(
         Mapping ``{cdr3_aho: min_heavy_atom_distance_to_FR2}`` for non-stem CDR3
         residues that are present and have at least one FR2 partner present.
     """
-    fr2_residues = [
-        residues_by_aho[aho] for aho in FR2_CONTACT_AHOS if aho in residues_by_aho
-    ]
-    fr2_heavy_by_res = [
-        [a for a in res if not a.name.startswith("H")] for res in fr2_residues
-    ]
-    fr2_heavy_by_res = [atoms for atoms in fr2_heavy_by_res if atoms]
-
-    res_min: Dict[int, float] = {}
-    if not fr2_heavy_by_res:
-        return res_min
-
-    cdr3_contact_positions = [aho for aho in cdr3_ahos if aho not in CDR3_STEM_AHOS]
-    for cdr3_aho in cdr3_contact_positions:
-        cdr3_res = residues_by_aho.get(cdr3_aho)
-        if cdr3_res is None:
+    fr2_atoms = [atom for pos, residue in residues_by_aho.items()
+                 if _base_aho(pos) in FR2_CONTACT_AHOS for atom in _heavy_atoms(residue)]
+    if not fr2_atoms:
+        return {}
+    cdr3_positions = set(cdr3_ahos) - set(CDR3_STEM_AHOS)
+    res_min = {}
+    for pos, residue in residues_by_aho.items():
+        if _base_aho(pos) not in cdr3_positions:
             continue
-        cdr3_heavy = [a for a in cdr3_res if not a.name.startswith("H")]
-        if not cdr3_heavy:
-            continue
-        best: Optional[float] = None
-        for fr_heavy in fr2_heavy_by_res:
-            pair_min = min(
-                cdr3_atom - fr_atom
-                for cdr3_atom in cdr3_heavy
-                for fr_atom in fr_heavy
-            )
-            if best is None or pair_min < best:
-                best = float(pair_min)
-        if best is not None:
-            res_min[cdr3_aho] = best
+        atoms = _heavy_atoms(residue)
+        if atoms:
+            res_min[pos] = float(min(a - b for a in atoms for b in fr2_atoms))
     return res_min
 
 
 def compute_cdr3_fr2_contact_nres(
-    residues_by_aho: Dict[int, Residue],
+    residues_by_aho: Dict[AhoPosition, Residue],
     cdr3_ahos: Iterable[int],
     *,
     soft: bool = True,
@@ -433,7 +376,7 @@ def _logistic_contact_weight(distance: float, midpoint: float, width: float) -> 
 
 
 def compute_cdr3_fr2_contacts(
-    residues_by_aho: Dict[int, Residue],
+    residues_by_aho: Dict[AhoPosition, Residue],
     cdr3_ahos: Iterable[int],
     *,
     soft: bool = False,
@@ -468,7 +411,7 @@ def compute_cdr3_fr2_contacts(
 
     Parameters
     ----------
-    residues_by_aho : Dict[int, Residue]
+    residues_by_aho : Dict[AhoPosition, Residue]
         Mapping from AHo position to Residue object for the nanobody chain.
     cdr3_ahos : Iterable[int]
         AHo positions belonging to CDR3 (including stems).
@@ -521,6 +464,14 @@ def _compute_region_rsa(
 
     Returns None if no residues could be processed or if max SASA is zero.
     """
+    # The trained RSA feature uses heavy atoms. Work on a copy so added
+    # hydrogens cannot change the feature or mutate the caller's structure.
+    structure = structure.copy()
+    for residue in structure.get_residues():
+        keep = {atom.id for atom in _heavy_atoms(residue)}
+        for atom in list(residue):
+            if atom.id not in keep:
+                residue.detach_child(atom.id)
     model = structure[0]
     if chain_id not in model:
         return None
@@ -590,14 +541,14 @@ def compute_fr2_rsa(
 #   incorrectly clustered as Extended). In supervised training, CDR3 length
 #   had a surprising NEGATIVE coefficient (-0.028), suggesting it doesn't help.
 #
-# DECISION: The Structure Classifier uses only the original 6 features:
-#   alpha_N, tau_N, alpha_C, tau_C, contact_density, fr2_rsa_key
+# CDR lengths remain excluded. The v0.3.0 classifier uses six features:
+#   cos_alpha_N, tau_N, cos_alpha_C, tau_C, contact_nres, fr2_rsa_key
 #
 # These functions are retained for descriptive statistics and potential future use.
 # ---------------------------------------------------------------------------
 
 
-def compute_cdr2_length(residues_by_aho: Dict[int, Residue]) -> int:
+def compute_cdr2_length(residues_by_aho: Dict[AhoPosition, Residue]) -> int:
     """
     Compute the number of resolved CDR2 residues.
 
@@ -614,10 +565,10 @@ def compute_cdr2_length(residues_by_aho: Dict[int, Residue]) -> int:
     int
         Number of residues present in the structure for CDR2 (AHo 57-69).
     """
-    return sum(1 for aho in CDR2_AHOS if aho in residues_by_aho)
+    return sum(1 for pos in residues_by_aho if _base_aho(pos) in CDR2_AHOS)
 
 
-def compute_cdr3_length(residues_by_aho: Dict[int, Residue]) -> int:
+def compute_cdr3_length(residues_by_aho: Dict[AhoPosition, Residue]) -> int:
     """
     Compute the number of resolved CDR3 residues (including stems).
 
@@ -637,7 +588,7 @@ def compute_cdr3_length(residues_by_aho: Dict[int, Residue]) -> int:
     int
         Number of CDR3 residues present in the structure (AHo 108-138).
     """
-    return sum(1 for aho in CDR3_AHOS if aho in residues_by_aho)
+    return sum(1 for pos in residues_by_aho if _base_aho(pos) in CDR3_AHOS)
 
 
 # ---------------------------------------------------------------------------
@@ -747,12 +698,12 @@ def compute_structure_features(
     seqid_for_log: Optional[str] = None,
 ) -> StructureFeatureDict:
     """
-    High-level helper: compute all structure-based features for a single PDB.
+    High-level helper: compute structure features from an AHo-numbered file.
 
     Parameters
     ----------
     pdb_path : str
-        Path to an AHo-numbered PDB file.
+        Path to an AHo-numbered PDB or mmCIF file.
     chain_id : str, default 'H'
         Chain identifier containing the nanobody.
     seqid_for_log : str, optional
@@ -761,13 +712,10 @@ def compute_structure_features(
     Returns
     -------
     StructureFeatureDict
-        Dictionary with 6 features:
-        - alpha_N, tau_N: N-terminal CDR3 angles
-        - alpha_C, tau_C: C-terminal CDR3 angles
-        - contact_density: CDR3-FR2 contact density
-        - fr2_rsa_key: RSA at FR2 key positions (44, 54)
-        - cdr2_length: Number of resolved CDR2 residues
-        - cdr3_length: Number of resolved CDR3 residues (excluding stems)
+        The six classifier inputs plus raw alpha_N/alpha_C dihedrals and
+        legacy contact_density. fr2_rsa_key measures RSA at AHo 44. CDR lengths
+        are available through separate helpers; framework_rmsd is added by
+        the higher-level numbering APIs.
     """
     structure = load_structure(pdb_path, seqid_for_log=seqid_for_log or "")
     chain = get_chain(structure, chain_id)
@@ -848,5 +796,4 @@ __all__ = [
     "calculate_framework_rmsd",
     "compute_structure_features",
 ]
-
 
