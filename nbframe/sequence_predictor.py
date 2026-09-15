@@ -199,6 +199,10 @@ def _predict_with_lr_model(aligned_sequence, model_bundle, verbose=False):
     classifier = model_bundle['classifier']
     hallmark_features = model_bundle['hallmark_features']
 
+    error = align.validate_aligned_sequence(aligned_sequence, [f['position'] for f in hallmark_features])
+    if error:
+        raise ValueError(error)
+
     # Extract features
     features = []
     for hf in hallmark_features:
@@ -251,6 +255,11 @@ def _predict_batch_with_lr_model(aligned_sequences, model_bundle, verbose=False)
     scaler = model_bundle['scaler']
     classifier = model_bundle['classifier']
     hallmark_features = model_bundle['hallmark_features']
+
+    for sequence in aligned_sequences:
+        error = align.validate_aligned_sequence(sequence, [f['position'] for f in hallmark_features])
+        if error:
+            raise ValueError(error)
 
     n_seqs = len(aligned_sequences)
     n_features = len(hallmark_features)
@@ -330,6 +339,10 @@ def predict_kink_probability(
     }
 
     try:
+        error = align._validate_sequence(sequence) if do_alignment else align.validate_aligned_sequence(sequence)
+        if error:
+            result['error'] = error
+            return result
         # Step 1: Align sequence to AHo numbering (if requested)
         aligned_sequence = sequence
         if do_alignment:
@@ -465,6 +478,7 @@ def classify_sequences(
     do_alignment: bool = True,
     batch_size: int = 100,
     verbose: bool = False,
+    ncpu: int | None = None,
 ) -> list[dict]:
     """
     Classify multiple VHH sequences as kinked, extended, or uncertain.
@@ -487,6 +501,8 @@ def classify_sequences(
         Number of sequences to process in each batch.
     verbose : bool, default=False
         Whether to print verbose output.
+    ncpu : int, optional
+        Maximum ANARCI workers. Must be positive when provided.
 
     Returns
     -------
@@ -499,6 +515,7 @@ def classify_sequences(
         fix_cdr1_gaps=fix_cdr1_gaps,
         do_alignment=do_alignment,
         batch_size=batch_size,
+        ncpu=ncpu,
         verbose=verbose,
     )
 
@@ -536,118 +553,76 @@ def predict_kink_probabilities(
     verbose: bool = False,
     do_alignment: bool = True,
     batch_size: int = 100,
+    ncpu: int | None = None,
 ):
+    """Score sequences in bounded alignment and inference batches.
+
+    One result is returned per input, including malformed records. batch_size
+    bounds temporary alignment/feature arrays; the input and returned result
+    list still occupy memory proportional to the total number of sequences.
+    ncpu optionally caps ANARCI workers.
     """
-    Predict kinking probabilities for a list of sequences using efficient batch processing.
-
-    This is the primary high‑throughput API for scoring many sequences. It uses
-    vectorised scoring in chunks instead of per‑sequence processing and is
-    designed to scale to millions of sequences.
-
-    Parameters
-    ----------
-    sequences : list[str]
-        A list of input VHH sequence strings.
-    fix_cdr1_gaps : bool, default=True
-        Whether to fix CDR1 gaps during alignment.
-    verbose : bool, default=False
-        If True, print progress messages.
-    do_alignment : bool, default=True
-        If True, perform AHo alignment on each input sequence.
-        If False, assumes the input sequences are already AHo-aligned.
-    batch_size : int, default=100
-        Number of sequences to process in each batch.
-
-    Returns
-    -------
-    list
-        A list of dictionaries with prediction results for each sequence.
-    """
-    n_total = len(sequences)
-
+    align._validate_positive_int(batch_size, "batch_size")
+    if ncpu is not None:
+        align._validate_positive_int(ncpu, "ncpu")
+    if not sequences:
+        return []
+    start_time = time.time()
+    lr_model = _load_lr_model(verbose=verbose)
+    hallmark_positions = [f['position'] for f in lr_model['hallmark_features']]
     if verbose:
-        start_time = time.time()
-        # Load model first so we can show metadata
-        lr_model = _load_lr_model(verbose=False)
-        model_name = lr_model.get("model_name", "LR 2026-01-19")
-        n_features = len(lr_model.get("hallmark_features", []))
-        alignment_status = "yes" if do_alignment else "skipped"
         console.log(
-            f"NbFrame Sequence Classifier\n"
-            f"           Model: {model_name} ({n_features} hallmark features)\n"
-            f"           Input: {n_total:,} sequences (alignment: {alignment_status})"
+            f"NbFrame Sequence Classifier: {len(sequences):,} sequences, "
+            f"{len(lr_model['hallmark_features'])} hallmark features, batch size {batch_size}"
         )
-    else:
-        lr_model = _load_lr_model(verbose=False)
-
     results = []
-    aligned_sequences = sequences
-
-    # Step 1: Batch align all sequences if needed
-    if do_alignment:
+    for start in range(0, len(sequences), batch_size):
+        batch = sequences[start:start + batch_size]
+        errors = [(align._validate_sequence(seq) if do_alignment
+                   else align.validate_aligned_sequence(seq, hallmark_positions)) for seq in batch]
+        if do_alignment:
+            # Only valid sequences reach the external aligner. Preserve slots
+            # for invalid records so results cannot shift relative to inputs.
+            valid_indices = [i for i, error in enumerate(errors) if error is None]
+            aligned = [None] * len(batch)
+            if valid_indices:
+                values = align.batch_align_sequences(
+                    [batch[i] for i in valid_indices], fix_cdr1_gaps=fix_cdr1_gaps,
+                    verbose=verbose, chunk_size=batch_size, ncpu=ncpu,
+                )
+                for i, value in zip(valid_indices, values):
+                    aligned[i] = value
+        else:
+            aligned = batch
+        batch_results = []
+        valid_seqs, valid_indices = [], []
+        for i, (seq, aligned_seq, error) in enumerate(zip(batch, aligned, errors)):
+            if error is None:
+                error = ("Alignment failed" if aligned_seq is None else
+                         align.validate_aligned_sequence(aligned_seq, hallmark_positions))
+            result = {'input_sequence': seq, 'aligned_sequence': aligned_seq,
+                      'raw_score': None, 'probability': None, 'error': error}
+            batch_results.append(result)
+            if error is None:
+                valid_seqs.append(aligned_seq)
+                valid_indices.append(i)
+        if valid_seqs:
+            probabilities, scores = _predict_batch_with_lr_model(valid_seqs, lr_model)
+            for i, probability, score in zip(valid_indices, probabilities, scores):
+                batch_results[i]['probability'] = float(probability)
+                batch_results[i]['raw_score'] = float(score)
+        results.extend(batch_results)
         if verbose:
-            align_start = time.time()
-            console.log(f"Aligning {n_total:,} sequences...")
-        aligned_sequences = align.batch_align_sequences(
-            sequences,
-            fix_cdr1_gaps=fix_cdr1_gaps,
-            verbose=verbose,
-            chunk_size=batch_size
-        )
-        if verbose:
-            align_time = time.time() - align_start
-            console.log(f"Alignment complete ({align_time:.1f}s)")
-
-    # Create a list of valid aligned sequences for scoring
-    valid_seqs = []
-    valid_indices = []
-
-    for i, (seq, aligned_seq) in enumerate(zip(sequences, aligned_sequences)):
-        result = {
-            'input_sequence': seq,
-            'aligned_sequence': aligned_seq,
-            'raw_score': None,
-            'probability': None,
-            'error': None
-        }
-
-        if aligned_seq is None:
-            result['error'] = "Alignment failed"
-            results.append(result)
-            continue
-
-        valid_seqs.append(aligned_seq)
-        valid_indices.append(i)
-        results.append(result)
-
-    # Step 2 & 3: Batch calculate scores and probabilities
-    if valid_seqs:
-        if verbose:
-            feat_start = time.time()
-            console.log(f"Extracting features & scoring {len(valid_seqs):,} valid sequences...")
-
-        probabilities, scores = _predict_batch_with_lr_model(valid_seqs, lr_model, verbose=False)
-
-        if verbose:
-            score_time = time.time() - feat_start
-            console.log(f"Scoring complete ({score_time:.1f}s)")
-
-        for i, idx in enumerate(valid_indices):
-            results[idx]['raw_score'] = float(scores[i]) if isinstance(scores, np.ndarray) else scores[i]
-            results[idx]['probability'] = float(probabilities[i]) if isinstance(probabilities, np.ndarray) else probabilities[i]
-
+            console.log(f"Scored {len(results):,}/{len(sequences):,} sequences")
     if verbose:
-        total_time = time.time() - start_time
-        successful = sum(1 for r in results if r['probability'] is not None)
-        failed = n_total - successful
-        speed = successful / total_time if total_time > 0 else 0
+        elapsed = time.time() - start_time
+        successful = sum(result['error'] is None for result in results)
         console.log(
-            f"Results: {successful:,} successful / {failed:,} failed\n"
-            f"           Speed:  {speed:,.0f} seq/s\n"
-            f"           Total:  {total_time / 60:.2f} minutes"
+            f"Results: {successful:,} successful / {len(results) - successful:,} failed "
+            f"in {elapsed:.1f}s"
         )
-
     return results
+
 
 def predict_from_fasta(
     fasta_file: str,
@@ -655,7 +630,8 @@ def predict_from_fasta(
     verbose: bool = False,
     do_alignment: bool = True,
     batch_size: int = 100,
-    output_csv: str | None = None
+    output_csv: str | None = None,
+    ncpu: int | None = None,
 ):
     """
     Predict kinking probability for all sequences in a FASTA file using batch processing.
@@ -675,6 +651,8 @@ def predict_from_fasta(
         Number of sequences to process in each batch.
     output_csv : str, optional
         Path to save results as CSV file.
+    ncpu : int, optional
+        Maximum ANARCI workers. Must be positive when provided.
 
     Returns
     -------
@@ -703,7 +681,8 @@ def predict_from_fasta(
         fix_cdr1_gaps=fix_cdr1_gaps,
         verbose=verbose,
         do_alignment=do_alignment,
-        batch_size=batch_size
+        batch_size=batch_size,
+        ncpu=ncpu,
     )
 
     # Convert to DataFrame
@@ -802,4 +781,3 @@ def predict_dataframe(
         console.log(f"Added columns: {columns_str}")
 
     return target_df
-

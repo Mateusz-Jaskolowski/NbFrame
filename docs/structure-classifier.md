@@ -21,13 +21,13 @@ nbframe classify-structure [OPTIONS]
 | `-c, --chain ID` | Specific chain ID(s), comma-separated |
 | `--output-json FILE` | Save full results as JSON |
 | `--output-csv FILE` | Save summary as CSV |
-| `--output-aho-pdb DIR` | Save AHo-numbered PDBs |
+| `--output-aho-pdb DIR` | Save AHo-numbered structures; multi-character chain IDs use mmCIF |
 | `-v, --verbose` | Show detailed output |
 | `--recursive` | Search PDB directory recursively |
 | `--summary-only` | Exclude per-structure features from JSON and CSV output |
 | `--no-rmsd-filter` | Disable framework RMSD quality filter |
 | `--rmsd-threshold FLOAT` | Maximum framework RMSD (default: 2.0 Å) |
-| `--progress-interval INT` | Number of PDBs processed between progress updates (default: 50) |
+| `--progress-interval INT` | Positive number of structures between progress updates (default: 50) |
 | `--kinked-threshold FLOAT` | Threshold for kinked classification (default: 0.55) |
 | `--extended-threshold FLOAT` | Threshold for extended classification (default: 0.25) |
 
@@ -86,6 +86,47 @@ results = classify_all_nanobodies_in_pdb("complex.pdb")
 for chain_id, result in results.items():
     print(f"Chain {chain_id}: {result['label']}")
 ```
+
+Automatic discovery considers unpaired heavy chains of 90–150 residues as
+VHH-like candidates. In a mixed Fab/nanobody complex, light chains only exclude
+the heavy domains with which they form a local interface. The pairing heuristic
+requires at least three heavy FR2 Cα atoms within 8 Å of a numbered light domain
+and matches the strongest interfaces first. Chain identity is still heuristic;
+use explicit chain IDs for ambiguous complexes or tagged/fused domains outside
+the automatic length range. The bundled 9bt8 example now detects nanobody A
+while excluding the Fab heavy chain H paired with light chain L.
+
+### Files, residue identities, and quality filtering
+
+Directory mode recognises `.pdb`, `.ent`, `.cif`, and `.mmcif`, case-insensitively.
+Multi-character chain IDs are preserved in mmCIF intermediates and exports.
+Saved filenames include a digest of the absolute input path so that structures
+with identical basenames in different directories cannot silently replace one
+another in ordinary use.
+
+`compute_features_for_pdb_directory` uses paths relative to the input directory,
+including the extension, as `Structure_ID` and dictionary keys. Its DataFrame
+and CSV outputs contain both cosine features required by the current model,
+alongside the raw angles. Passing an explicit `pattern` still restricts file
+discovery to that glob.
+
+The low-level residue mapping keeps ordinary AHo positions as integer keys and
+insertions as string keys, for example `123`, `"123A"`, and `"123H"`. Contact and
+length calculations include inserted residues independently; framework RMSD
+matches the base framework positions. Hydrogens and deuterium are excluded from
+contacts and RSA using their element, with atom-name fallback when it is absent.
+
+Angle calculations require CA atoms and connected peptide neighbours. Missing
+backbone atoms or broken C–N/CA connectivity return missing angles and prevent
+classification, rather than allowing later resolved residues to substitute for
+missing neighbours. Framework-filter warnings distinguish excessive RMSD from
+insufficient matching framework coverage. These checks do not establish full
+sidechain or loop completeness.
+
+Direct callers of `renumber_structure_to_aho` who omit `temp_dir` own the returned
+temporary directory and must remove it when finished. For example, after using
+the file, call `shutil.rmtree(output_path.parent)`. High-level classification and
+batch APIs continue to clean up their temporary directories automatically.
 
 ---
 

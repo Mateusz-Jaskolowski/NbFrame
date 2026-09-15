@@ -11,6 +11,7 @@ import anarci
 import numpy as np
 
 from .sequence_config import (
+    AHO_ALIGNED_LENGTH,
     CDR1_END_IDX,
     CDR1_GAP_TARGET_IDX,
     CDR1_START_IDX,
@@ -73,10 +74,59 @@ def _validate_sequence(sequence: str) -> Optional[str]:
     """
     if not isinstance(sequence, str) or not sequence:
         return "Input sequence must be a non-empty string."
+    if len(sequence) >= 10000:
+        return "Input sequence must contain fewer than 10000 residues (ANARCI limit)."
     invalid_chars = set(sequence.upper()) - _VALID_AMINO_ACIDS
     if invalid_chars:
         return f"Input sequence contains invalid characters: {', '.join(sorted(invalid_chars))}"
     return None
+
+
+def validate_aligned_sequence(sequence, hallmark_positions=()) -> Optional[str]:
+    """Validate the canonical 149-column input used by the sequence model.
+
+    At least 80 residues and 80% of the model's distinct hallmark positions
+    must be resolved. This permits ordinary AHo gaps (including position 85)
+    while rejecting sparse inputs that would otherwise score as all zeros.
+    X is allowed as an unknown residue, but does not count as resolved.
+    It does not verify domain identity when the caller skips ANARCI.
+    """
+    if not isinstance(sequence, str) or len(sequence) != AHO_ALIGNED_LENGTH:
+        return f"AHo-aligned input must be a string of exactly {AHO_ALIGNED_LENGTH} columns."
+    sequence = sequence.upper()
+    invalid = set(sequence) - (_VALID_AMINO_ACIDS | {"-", "X"})
+    if invalid:
+        return f"AHo-aligned input contains invalid characters: {', '.join(sorted(invalid))}"
+    if sum(aa in _VALID_AMINO_ACIDS for aa in sequence) < 80:
+        return "AHo-aligned input must contain at least 80 resolved amino acids."
+    positions = set(hallmark_positions)
+    if positions and sum(sequence[p - 1] in _VALID_AMINO_ACIDS for p in positions) / len(positions) < 0.8:
+        return "Fewer than 80% of the model's hallmark positions are resolved."
+    return None
+
+
+def _canonical_aho_string(numbering, fix_cdr1_gaps=False):
+    """Project labelled numbering onto base AHo positions 1–149.
+
+    Insertions remain distinct in the numbering, but occupy no model column:
+    36A must never displace the residue at 37. The original input sequence is
+    retained in prediction results; this projection is not a lossless sequence.
+    """
+    positions = {}
+    for raw_pos, aa in numbering:
+        label = _decode_aho_position(raw_pos)
+        if label is None or label in positions:
+            raise ValueError(f"Invalid or duplicate ANARCI AHo position: {raw_pos!r}")
+        positions[label] = aa
+    aligned = [positions.get(p, "-") for p in range(1, AHO_ALIGNED_LENGTH + 1)]
+    if fix_cdr1_gaps:
+        _fix_cdr1_gaps(aligned)
+    return "".join(aligned)
+
+
+def _validate_positive_int(value, name):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer.")
 
 
 def _contiguous_regions(condition):
@@ -138,6 +188,9 @@ def _fix_cdr1_gaps(aligned_list: list, verbose: bool = False, seq_label: str = "
     if len(gap_regions) == 1:
         start, end = gap_regions[0]
         num_gaps = end - start
+        # The CDR1 correction must never move framework/model columns.
+        if CDR1_GAP_TARGET_IDX + num_gaps > CDR1_END_IDX:
+            return
         current_start = CDR1_START_IDX + start
         if current_start != CDR1_GAP_TARGET_IDX and aligned_list[CDR1_GAP_TARGET_IDX] != "-":
             if verbose:
@@ -190,7 +243,7 @@ def get_aho_aligned_vhh_string(sequence: str, fix_cdr1_gaps: bool = True, verbos
 
     Optionally fixes gaps in the CDR-H1 region based on common ANARCI
     post-processing heuristics. The length of the returned sequence should
-    always match the length of the direct ANARCI alignment.
+    be 149 base-position columns; labelled insertions do not occupy model columns.
 
     Parameters
     ----------
@@ -228,12 +281,7 @@ def get_aho_aligned_vhh_string(sequence: str, fix_cdr1_gaps: bool = True, verbos
             sys.stderr.write(f"Sequence identified as chain type '{chain_type}', not 'H'. Required for VHH processing.\n")
             return None
 
-        aligned_list = [aa for (_, aa) in numbering_list]
-
-        if fix_cdr1_gaps:
-            _fix_cdr1_gaps(aligned_list, verbose=verbose, seq_label=sequence[:10])
-
-        return ''.join(aligned_list)
+        return _canonical_aho_string(numbering_list, fix_cdr1_gaps)
 
     except Exception as e:
         sys.stderr.write(f"An error occurred during ANARCI processing or gap fixing: {e}\n")
@@ -259,8 +307,9 @@ def _decode_aho_position(raw_pos: object) -> Union[int, str, None]:
         - (chain_type, num, icode)
         - num
 
-    We extract the first integer we see as the base AHo number, and, if there
-    is a single-letter alphabetic insertion code (e.g. 'A'), we append it.
+    Tuple layout determines the base number and insertion code. A single-letter
+    insertion (including H, K, or L) is appended to the number; unsupported
+    layouts return None.
     """
     if raw_pos is None:
         return None
@@ -269,19 +318,21 @@ def _decode_aho_position(raw_pos: object) -> Union[int, str, None]:
         return raw_pos
 
     if isinstance(raw_pos, tuple):
-        ints = [x for x in raw_pos if isinstance(x, int)]
-        if not ints:
+        # ANARCI uses (number, insertion); older wrappers may prepend a chain
+        # type. The insertion is determined by its position, not its letter.
+        if len(raw_pos) == 2 and isinstance(raw_pos[0], int):
+            number, insertion = raw_pos
+        elif len(raw_pos) in (2, 3) and isinstance(raw_pos[0], str) and isinstance(raw_pos[1], int):
+            number = raw_pos[1]
+            insertion = raw_pos[2] if len(raw_pos) == 3 else " "
+        else:
             return None
-        aho_num = ints[0]
-
-        insertion: Optional[str] = None
-        for x in raw_pos:
-            if isinstance(x, str) and len(x) == 1 and x.isalpha() and x not in {"H", "L", "K"}:
-                insertion = x
-
-        if insertion:
-            return f"{aho_num}{insertion}"
-        return aho_num
+        if not isinstance(insertion, str):
+            return None
+        insertion = insertion.strip()
+        if insertion and (len(insertion) != 1 or not insertion.isalpha()):
+            return None
+        return f"{number}{insertion}" if insertion else number
 
     return None
 
@@ -349,121 +400,41 @@ def run_anarci_for_chains(chain_seqs: Dict[str, str]) -> Dict[str, AnarciChainRe
 # ---------------------------------------------------------------------------
 
 
-def batch_align_sequences(sequences, fix_cdr1_gaps=False, verbose=False, chunk_size=None):
-    """
-    Align multiple sequences using ANARCI in batches for better performance.
+def batch_align_sequences(sequences, fix_cdr1_gaps=False, verbose=False, chunk_size=None, ncpu=None):
+    """Align sequences in bounded ANARCI chunks, preserving input order.
 
-    Parameters
-    ----------
-    sequences : list
-        List of sequences to align.
-    fix_cdr1_gaps : bool, optional
-        If True, attempts to fix gaps in the CDR-H1 region.
-        Defaults to False.
-    verbose : bool, optional
-        If True, print progress messages.
-        Defaults to False.
-    chunk_size : int, optional
-        Not used directly as run_anarci handles batching internally.
-        Included for API compatibility.
-
-    Returns
-    -------
-    list
-        List of aligned sequences in the same order as input.
-        None values are returned for sequences that couldn't be aligned.
+    Invalid records return None without preventing valid records from being
+    aligned. Infrastructure failures propagate to the caller. Results contain
+    149 base AHo columns; insertion residues do not shift those columns.
+    ``chunk_size`` defaults to 100 and ``ncpu`` caps parallel workers.
     """
-    import time
     import multiprocessing
 
-    if verbose:
-        print(f"Starting batch alignment of {len(sequences)} sequences...", file=sys.stderr)
-        start_time = time.time()
-
+    chunk_size = 100 if chunk_size is None else chunk_size
+    _validate_positive_int(chunk_size, "chunk_size")
+    if ncpu is not None:
+        _validate_positive_int(ncpu, "ncpu")
+    workers = ncpu if ncpu is not None else max(1, multiprocessing.cpu_count() - 1)
     result = [None] * len(sequences)
-    total_sequences = len(sequences)
-
-    # Prepare sequence tuples for ANARCI batch processing
-    sequence_tuples = [(f"seq_{i}", seq) for i, seq in enumerate(sequences)]
-
-    # Determine optimal number of CPUs to use (leave one for system)
-    num_cpus = max(1, multiprocessing.cpu_count() - 1)
-
-    if verbose:
-        print(f"Running ANARCI alignment using {num_cpus} CPU cores...", file=sys.stderr)
-
-    # Use run_anarci for batch processing
-    _, numbered, alignment_details, _ = anarci.run_anarci(
-        sequence_tuples,
-        scheme="aho",
-        ncpu=num_cpus,
-        output=False,
-        allow={"H"},
-        assign_germline=False
-    )
-
-    # Process the results with progress reporting
-    if verbose:
-        print("Processing alignment results...", file=sys.stderr)
-        processing_start_time = time.time()
-        last_update_time = processing_start_time
-
-    successful_count = 0
-
-    for i, (numbering, details) in enumerate(zip(numbered, alignment_details)):
-        # Update progress periodically
-        if verbose and (i % 1000 == 0 or i == total_sequences - 1):
-            current_time = time.time()
-            elapsed = current_time - processing_start_time
-
-            if i > 0:
-                seqs_per_sec = (i + 1) / elapsed
-                remaining_seqs = total_sequences - (i + 1)
-                eta_seconds = remaining_seqs / seqs_per_sec if seqs_per_sec > 0 else 0
-                eta_minutes = eta_seconds / 60
-
-                if current_time - last_update_time >= 1.0:
-                    print(
-                        f"Processing alignment {i+1}/{total_sequences} sequences "
-                        f"({successful_count} successful) - "
-                        f"ETA: {eta_minutes:.1f} minutes remaining",
-                        file=sys.stderr, end="\r",
-                    )
-                    last_update_time = current_time
-            else:
-                print(f"Processing alignment {i+1}/{total_sequences} sequences", file=sys.stderr, end="\r")
-
-        # Skip sequences that didn't align
-        if numbering is None or not numbering:
+    for start in range(0, len(sequences), chunk_size):
+        valid = [(i, sequences[i]) for i in range(start, min(start + chunk_size, len(sequences)))
+                 if _validate_sequence(sequences[i]) is None]
+        if not valid:
             continue
-
-        # Check for domains identified in this sequence
-        for domain_idx, domain_data in enumerate(numbering):
-            domain_numbering = domain_data[0]
-
-            chain_type = alignment_details[i][domain_idx]["chain_type"]
-            if chain_type != 'H':
-                continue
-
-            aligned_list = [aa for (_, aa) in domain_numbering]
-
-            if fix_cdr1_gaps:
-                _fix_cdr1_gaps(aligned_list)
-
-            aligned_sequence = ''.join(aligned_list)
-            result[i] = aligned_sequence
-            successful_count += 1
-
-            # We only care about the first domain found for each sequence
-            break
-
-    if verbose:
-        total_time = time.time() - start_time
-        minutes = total_time / 60
-        print(
-            f"\nCompleted batch alignment in {minutes:.2f} minutes. "
-            f"Successfully aligned {successful_count}/{total_sequences} sequences.",
-            file=sys.stderr,
+        _, numbered, details, _ = anarci.run_anarci(
+            [(f"seq_{i}", seq.upper()) for i, seq in valid],
+            scheme="aho", ncpu=min(workers, len(valid)), output=False,
+            allow={"H"}, assign_germline=False,
         )
-
+        if len(numbered) != len(valid) or len(details) != len(valid):
+            raise RuntimeError("ANARCI returned a different number of records than requested.")
+        for (i, _), domains, domain_details in zip(valid, numbered, details):
+            if not domains:
+                continue
+            for domain, detail in zip(domains, domain_details):
+                if detail["chain_type"] == "H":
+                    result[i] = _canonical_aho_string(domain[0], fix_cdr1_gaps)
+                    break
+        if verbose:
+            print(f"Aligned {min(start + chunk_size, len(sequences))}/{len(sequences)} sequences", file=sys.stderr)
     return result

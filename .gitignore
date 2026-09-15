@@ -24,3 +24,6 @@ env/
 htmlcov/
 .coverage
 .coverage.*
+
+# Local working notes
+/docs/review-*.md

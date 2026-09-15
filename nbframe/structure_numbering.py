@@ -23,15 +23,20 @@ The public entry points are:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Union
 
 import sys
 import tempfile
+import hashlib
+import warnings
+from urllib.parse import quote
+
+import numpy as np
 
 import anarci
-from Bio.PDB import PDBParser, MMCIFParser, PDBIO
+from Bio.PDB import PDBParser, MMCIFParser, PDBIO, MMCIFIO
 from Bio.PDB.Chain import Chain
 from Bio.PDB.Model import Model
 from Bio.PDB.Residue import Residue
@@ -47,6 +52,7 @@ from .structure_config import (
 )
 from .structure_features import (
     StructureFeatureDict,
+    STRUCTURE_FEATURE_COLUMNS,
     _get_structure_parser,
     _is_mmcif_file,
     calculate_framework_rmsd,
@@ -77,6 +83,7 @@ class ChainInfo:
 
     sequence: str
     residue_ids: List[Tuple[str, int, str]]
+    residues: List[Residue] = field(default_factory=list, repr=False, compare=False)
 
 
 @dataclass
@@ -142,6 +149,7 @@ def parse_pdb_chains(pdb_path: str) -> Dict[str, ChainInfo]:
     for chain in model:
         seq_chars: List[str] = []
         residue_ids: List[Tuple[str, int, str]] = []
+        protein_residues: List[Residue] = []
 
         for residue in chain:
             if not isinstance(residue, Residue):
@@ -159,12 +167,13 @@ def parse_pdb_chains(pdb_path: str) -> Dict[str, ChainInfo]:
                 continue
 
             seq_chars.append(aa)
+            protein_residues.append(residue)
             # Normalise insertion code to a string (Biopython can use ' ' or '')
             icode_str = icode if isinstance(icode, str) else str(icode or " ")
             residue_ids.append((hetfield, resseq, icode_str))
 
         if seq_chars:
-            chains[chain.id] = ChainInfo("".join(seq_chars), residue_ids)
+            chains[chain.id] = ChainInfo("".join(seq_chars), residue_ids, protein_residues)
 
     return chains
 
@@ -194,6 +203,61 @@ def _anarci_chain_type(sequence: str) -> Optional[str]:
     return chain_type
 
 
+def _domain_ca_coordinates(info: ChainInfo, framework_only: bool = False):
+    """Coordinates of the first ANARCI domain, excluding tags/constant regions."""
+    if not info.residues:
+        return np.empty((0, 3))
+    numbering, _ = anarci.number(info.sequence, scheme="aho")
+    if not numbering:
+        return np.empty((0, 3))
+    domain = "".join(aa for _, aa in numbering if aa != "-")
+    start = info.sequence.find(domain)
+    if start < 0:
+        return np.empty((0, 3))
+    coordinates = []
+    index = start
+    for (number, insertion), aa in numbering:
+        if aa == "-":
+            continue
+        residue = info.residues[index]
+        index += 1
+        if "CA" in residue and (not framework_only or 44 <= number <= 55):
+            coordinates.append(residue["CA"].coord)
+    return np.asarray(coordinates).reshape(-1, 3)
+
+
+def _paired_heavy_chains(chains, types):
+    """Infer local VH/VL pairs rather than vetoing a whole mixed complex.
+
+    Pairing is a heuristic: at least three heavy FR2 CA atoms must be within
+    8 Å of a numbered light domain. Match the strongest interfaces first, with
+    each heavy/light domain used at most once. Unpaired short heavy chains
+    remain VHH-like candidates, not a claim of biological chain identity.
+    """
+    heavy = {cid: _domain_ca_coordinates(chains[cid], framework_only=True)
+             for cid, kind in types.items() if kind == "H"}
+    light = {cid: _domain_ca_coordinates(chains[cid])
+             for cid, kind in types.items() if kind in ("L", "K")}
+    candidates = []
+    for hid, hcoords in heavy.items():
+        for lid, lcoords in light.items():
+            if not len(hcoords) or not len(lcoords):
+                continue
+            distances = np.linalg.norm(hcoords[:, None, :] - lcoords[None, :, :], axis=-1)
+            closest = distances.min(axis=1)
+            contacts = int(np.count_nonzero(closest <= 8.0))
+            if contacts >= 3:
+                candidates.append((-contacts, float(closest.mean()), hid, lid))
+    paired_heavy, paired_light = set(), set()
+    for _, _, hid, lid in sorted(candidates):
+        if hid not in paired_heavy and lid not in paired_light:
+            paired_heavy.add(hid)
+            paired_light.add(lid)
+    if any(not info.residues for cid, info in chains.items() if types[cid] in ("H", "L", "K")):
+        warnings.warn("Chain coordinates unavailable for VH/VL pairing; unpaired heavy chains are only VHH-like candidates.", UserWarning)
+    return paired_heavy
+
+
 def _classify_chains_with_anarci(
     chains: Dict[str, ChainInfo]
 ) -> Dict[str, ChainClassification]:
@@ -202,10 +266,10 @@ def _classify_chains_with_anarci(
 
     Heuristic:
       - First, get ANARCI chain_type for each sequence.
-      - If at least one light chain ('L' or 'K') is present, treat all heavy
-        chains as part of VH/VL or Fab ('VH'), not VHH.
-      - If no light chains are present, treat heavy chains ('H') with length
-        between 90 and 150 residues as VHH-like ('VHH').
+      - Use local FR2 contacts to identify heavy/light domain pairs.
+      - Unpaired heavy chains of 90–150 residues are VHH-like candidates.
+        Explicit chain selection remains available for tags/fusions and
+        ambiguous complexes.
     """
     types: Dict[str, Optional[str]] = {}
     for cid, info in chains.items():
@@ -215,6 +279,7 @@ def _classify_chains_with_anarci(
         t in ("L", "K") for t in types.values() if t is not None
     )
 
+    paired = _paired_heavy_chains(chains, types) if has_light else set()
     annotations: Dict[str, ChainClassification] = {}
     for cid, info in chains.items():
         chain_type = types[cid]
@@ -224,7 +289,7 @@ def _classify_chains_with_anarci(
         is_vhh = False
 
         if chain_type == "H":
-            if not has_light and 90 <= length <= 150:
+            if cid not in paired and 90 <= length <= 150:
                 kind = "VHH"
                 is_vhh = True
             else:
@@ -250,7 +315,7 @@ def identify_nanobody_chains(
 
     A chain is considered VHH-like if:
       - ANARCI classifies it as heavy ('H'),
-      - There are no light chains ('L' or 'K') in the structure, and
+      - No local VH/VL interface pairs it with a light chain, and
       - Its length is between 90 and 150 residues.
     """
     annotations = _classify_chains_with_anarci(chains)
@@ -505,14 +570,17 @@ def renumber_structure_to_aho(
         AHo labels (ints or strings).
     temp_dir
         Directory in which to write the renumbered PDB file. If None, a
-        temporary directory will be created.
+        persistent temporary directory will be created. The caller owns its
+        cleanup (e.g. shutil.rmtree(pdb_path.parent)). High-level batch APIs
+        supply and clean up their own temporary directory.
     basename
         Basename for the output PDB file. If None, derived from structure.id.
 
     Returns
     -------
     (new_structure, pdb_path)
-        The AHo-numbered Structure and the path to the written PDB file.
+        The AHo-numbered Structure and the path to the written file. Chains
+        with multi-character IDs are written as mmCIF (.cif), preserving IDs.
     """
     model: Model = structure[0]
     if chain_id not in model:
@@ -559,8 +627,7 @@ def renumber_structure_to_aho(
     new_structure.add(new_model)
 
     if temp_dir is None:
-        tmp = tempfile.TemporaryDirectory(prefix="nbframe_aho_")
-        temp_dir_path = Path(tmp.name)
+        temp_dir_path = Path(tempfile.mkdtemp(prefix="nbframe_aho_"))
     else:
         temp_dir_path = Path(temp_dir)
         temp_dir_path.mkdir(parents=True, exist_ok=True)
@@ -569,7 +636,9 @@ def renumber_structure_to_aho(
         basename = f"{structure.id}_aho.pdb"
 
     pdb_path = temp_dir_path / basename
-    io = PDBIO()
+    if len(chain_id) > 1:
+        pdb_path = pdb_path.with_suffix(".cif")
+    io = MMCIFIO() if _is_mmcif_file(str(pdb_path)) else PDBIO()
     io.set_structure(new_structure)
     io.save(str(pdb_path))
 
@@ -722,6 +791,12 @@ def compute_features_from_pdb(
     return results[0] if results else None
 
 
+def _aho_output_basename(pdb_path, chain_id):
+    source = str(Path(pdb_path).absolute())
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    return f"{quote(Path(pdb_path).stem, safe='')}_chain{quote(chain_id, safe='')}_{digest}.pdb"
+
+
 def compute_features_for_pdbs(
     pdb_paths: List[str],
     chain_ids: Optional[List[Optional[str]]] = None,
@@ -773,6 +848,8 @@ def compute_features_for_pdbs(
         Note: the returned list may be shorter than ``pdb_paths`` if structures
         are filtered out.
     """
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer.")
     if chain_ids is not None and len(chain_ids) != len(pdb_paths):
         raise ValueError(
             "If provided, chain_ids must have the same length as pdb_paths."
@@ -835,7 +912,7 @@ def compute_features_for_pdbs(
                     selected_chain_id,
                     pdb_to_aho,
                     temp_dir=temp_dir,
-                    basename=f"{Path(pdb_path).stem}_chain{selected_chain_id}.pdb",
+                    basename=_aho_output_basename(pdb_path, selected_chain_id),
                 )
 
                 # Calculate framework RMSD if filtering is enabled
@@ -852,13 +929,9 @@ def compute_features_for_pdbs(
                     if framework_rmsd is None or framework_rmsd > rmsd_threshold:
                         rmsd_filtered += 1
                         processed += 1
-                        if verbose:
-                            rmsd_str = f"{framework_rmsd:.2f}" if framework_rmsd else "N/A"
-                            print(
-                                f"[nbframe] Filtered {Path(pdb_path).name}: "
-                                f"framework RMSD {rmsd_str} Å > {rmsd_threshold} Å threshold",
-                                file=sys.stderr,
-                            )
+                        reason = ("insufficient matching framework CA coverage" if framework_rmsd is None
+                                  else f"framework RMSD {framework_rmsd:.2f} Å exceeds {rmsd_threshold} Å")
+                        warnings.warn(f"Filtered {pdb_path}, chain {selected_chain_id}: {reason}.", UserWarning)
                         continue
 
                 feats = compute_structure_features(
@@ -890,7 +963,7 @@ def compute_features_for_pdbs(
 
 def compute_features_for_pdb_directory(
     pdb_dir: Union[str, Path],
-    pattern: str = "*.pdb",
+    pattern: Optional[str] = None,
     *,
     save_pdb: bool = False,
     save_pdb_dir: Optional[Union[str, Path]] = None,
@@ -911,7 +984,7 @@ def compute_features_for_pdb_directory(
         Directory containing raw PDB files to process.
     pattern
         Glob pattern for selecting PDB files within the directory. Defaults
-        to ``\"*.pdb\"``.
+        to all supported PDB/mmCIF extensions when None.
     save_pdb
         If True, keep the intermediate AHo-numbered PDBs on disk.
     save_pdb_dir
@@ -957,10 +1030,10 @@ def compute_features_for_pdb_directory(
         )
 
     # Gather PDB files according to the requested pattern / recursion mode.
-    if recursive:
-        file_iter = pdb_dir_path.rglob(pattern)
-    else:
-        file_iter = pdb_dir_path.glob(pattern)
+    glob_pattern = pattern if pattern is not None else "*"
+    file_iter = pdb_dir_path.rglob(glob_pattern) if recursive else pdb_dir_path.glob(glob_pattern)
+    if pattern is None:
+        file_iter = (p for p in file_iter if p.suffix.lower() in {".pdb", ".ent", ".cif", ".mmcif"})
 
     pdb_paths_path: List[Path] = sorted(
         [p for p in file_iter if p.is_file()],
@@ -976,18 +1049,7 @@ def compute_features_for_pdb_directory(
                     "pandas is required to return an empty DataFrame when no "
                     "PDB files are found."
                 ) from exc
-            empty_columns = [
-                "Structure_ID",
-                "pdb_path",
-                "alpha_N",
-                "tau_N",
-                "alpha_C",
-                "tau_C",
-                "contact_density",
-                "contact_nres",
-                "fr2_rsa_key",
-                "framework_rmsd",
-            ]
+            empty_columns = ["Structure_ID", "pdb_path", *STRUCTURE_FEATURE_COLUMNS]
             df = pd.DataFrame(columns=empty_columns)
             if output_csv is not None:
                 df.to_csv(output_csv, index=False)
@@ -1010,7 +1072,7 @@ def compute_features_for_pdb_directory(
     rmsd_filtered_count = 0
 
     for idx, pdb_path in enumerate(pdb_paths_path, start=1):
-        sid = pdb_path.stem
+        sid = pdb_path.relative_to(pdb_dir_path).as_posix()
         path_str = str(pdb_path)
 
         try:
@@ -1084,18 +1146,7 @@ def compute_features_for_pdb_directory(
         row.update(feats)
         rows.append(row)
 
-    columns = [
-        "Structure_ID",
-        "pdb_path",
-        "alpha_N",
-        "tau_N",
-        "alpha_C",
-        "tau_C",
-        "contact_density",
-        "contact_nres",
-        "fr2_rsa_key",
-        "framework_rmsd",
-    ]
+    columns = ["Structure_ID", "pdb_path", *STRUCTURE_FEATURE_COLUMNS]
 
     df = pd.DataFrame(rows)
     # Ensure all expected columns exist, then enforce their order.

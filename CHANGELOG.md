@@ -5,6 +5,34 @@ All notable changes to NbFrame are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Preserve AHo base positions when aligning sequences with insertions; reject
+  malformed or insufficiently resolved pre-aligned inputs.
+- Check peptide connectivity before calculating CDR3 angles, retain structural
+  insertion identities, detect local VH/VL pairs in mixed complexes, and exclude
+  hydrogens/deuterium from contacts and RSA.
+- Isolate malformed sequence records and honour alignment/scoring batch sizes;
+  add an optional `ncpu` / `--ncpu` worker limit.
+- Support multi-character chain IDs through mmCIF intermediates and exports,
+  and discover all supported structure formats in directory mode.
+- Retain required cosine features in directory tables and prevent duplicate
+  input basenames from overwriting results or exported structures.
+- Report all-filtered CLI runs clearly and reject non-positive progress
+  intervals; keep direct renumbering outputs alive until caller cleanup.
+
+### Compatibility notes
+- Sequence alignment output is a 149-column projection onto base AHo positions;
+  insertion residues remain in the original input sequence.
+- Directory feature `Structure_ID` values and dictionary keys are now relative
+  file paths including extensions. Saved AHo filenames include an input-path
+  digest; multi-character chain IDs use `.cif`.
+- Direct callers of `renumber_structure_to_aho(..., temp_dir=None)` own cleanup
+  of the returned directory. High-level APIs still clean up automatically.
+- Models, feature coefficients, classification thresholds, sequence deduplication,
+  and first-model selection are unchanged.
+
 ## [0.3.0] - 2026-06-13
 
 Structure classifier feature overhaul, retrained on an expanded expert-labeled

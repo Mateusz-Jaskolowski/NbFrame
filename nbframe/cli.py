@@ -137,7 +137,8 @@ def classify_sequence_cmd(
     ),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose logs to stderr"),
     output_csv: Optional[str] = typer.Option(None, "--output-csv", "-o", help="Save results to CSV file"),
-    batch_size: int = typer.Option(100, "--batch-size", help="Batch size for FASTA processing"),
+    batch_size: int = typer.Option(100, "--batch-size", min=1, help="Batch size for FASTA processing"),
+    ncpu: Optional[int] = typer.Option(None, "--ncpu", min=1, help="Maximum ANARCI workers for FASTA processing"),
     label: bool = typer.Option(
         True,
         "--label/--no-label",
@@ -226,6 +227,7 @@ def classify_sequence_cmd(
                 verbose=verbose,
                 do_alignment=align,
                 batch_size=batch_size,
+                ncpu=ncpu,
             )
 
             # Add labels to the dataframe if requested
@@ -325,7 +327,7 @@ def classify_structure_cmd(
     output_aho_dir: Optional[str] = typer.Option(
         None,
         "--output-aho-pdb",
-        help="Directory to write AHo-numbered VHH PDBs for classified chains",
+        help="Directory for AHo-numbered structures (mmCIF for multi-character chain IDs)",
     ),
     summary_only: bool = typer.Option(
         False,
@@ -340,6 +342,7 @@ def classify_structure_cmd(
     progress_interval: int = typer.Option(
         50,
         "--progress-interval",
+        min=1,
         help=(
             "How often to print progress during directory classification "
             "(in number of PDBs processed)"
@@ -431,7 +434,7 @@ def classify_structure_cmd(
                         if res is not None:
                             results_by_chain[cid] = res
                         else:
-                            errors_by_chain[cid] = f"RMSD > {rmsd_threshold} Å threshold"
+                            errors_by_chain[cid] = f"Failed framework quality filter (RMSD limit {rmsd_threshold} Å or insufficient coverage)"
                     except Exception as exc:  # noqa: BLE001 - report per-chain failure
                         errors_by_chain[cid] = str(exc)
 
@@ -458,8 +461,18 @@ def classify_structure_cmd(
                     extended_threshold=extended_threshold,
                 )
                 errors_by_chain = {}
+        except typer.Exit:
+            raise
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"Error during structure classification: {exc}", err=True)
+            raise typer.Exit(code=1)
+
+        if not results_by_chain:
+            typer.echo(
+                f"Error: no chains passed framework quality filtering for {pdb_path!r} "
+                f"(RMSD limit {rmsd_threshold} Å or insufficient framework coverage).",
+                err=True,
+            )
             raise typer.Exit(code=1)
 
         # Verbose model info (using the first successful result).
@@ -569,11 +582,11 @@ def classify_structure_cmd(
             typer.echo(f"Error: {pdb_dir!r} is not a directory.", err=True)
             raise typer.Exit(code=1)
 
-        file_iter = dir_path.rglob("*.pdb") if recursive else dir_path.glob("*.pdb")
-        pdb_files = sorted(file_iter)
+        file_iter = dir_path.rglob("*") if recursive else dir_path.glob("*")
+        pdb_files = sorted(p for p in file_iter if p.is_file() and p.suffix.lower() in {".pdb", ".ent", ".cif", ".mmcif"})
         if not pdb_files:
             typer.echo(
-                f"Error: no .pdb files found in directory {pdb_dir!r}.",
+                f"Error: no PDB/mmCIF files found in directory {pdb_dir!r}.",
                 err=True,
             )
             raise typer.Exit(code=1)
@@ -715,7 +728,7 @@ def classify_structure_cmd(
     if csv_written and output_csv:
         outputs.append(f"\tClassification CSV summary: {output_csv}")
     if output_aho_dir:
-        outputs.append(f"\tAHo-numbered VHH PDBs: {output_aho_dir}")
+        outputs.append(f"\tAHo-numbered VHH structures: {output_aho_dir}")
 
     if outputs:
         typer.echo("")
