@@ -1,0 +1,86 @@
+name: Package checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.10'
+          - os: ubuntu-latest
+            python: '3.12'
+          - os: macos-latest
+            python: '3.10'
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: mamba-org/setup-micromamba@f457c30a868e4760d3a6fcea5f25dc655b8edf39 # v3
+        with:
+          environment-file: .github/ci-environment.yml
+          create-args: python=${{ matrix.python }}
+          cache-environment: true
+      - name: Install test and build dependencies
+        run: python -m pip install . pytest pytest-cov build
+      - name: Test
+        run: python -m pytest --cov=nbframe --cov-report=term-missing --cov-report=xml
+      - name: Build source archive and wheel from source archive
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.10'
+        run: |
+          python -m build
+          python scripts/check_distribution_contents.py dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.10'
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
+
+  install:
+    name: Fresh wheel (${{ matrix.os }}, Python ${{ matrix.python }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.10'
+          - os: ubuntu-latest
+            python: '3.12'
+          - os: macos-latest
+            python: '3.10'
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: distributions
+          path: dist
+      - uses: mamba-org/setup-micromamba@f457c30a868e4760d3a6fcea5f25dc655b8edf39 # v3
+        with:
+          environment-file: .github/ci-environment.yml
+          create-args: python=${{ matrix.python }}
+      - name: Install built wheel and check dependencies
+        run: |
+          python -m pip install dist/*.whl
+          python -m pip check
+      - name: Verify installed package outside checkout
+        run: |
+          cd "$RUNNER_TEMP"
+          python "$GITHUB_WORKSPACE/scripts/verify_distribution.py" "$GITHUB_WORKSPACE"

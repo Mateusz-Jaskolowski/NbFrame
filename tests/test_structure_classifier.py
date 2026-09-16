@@ -109,8 +109,7 @@ class TestStructureClassifierWithPDBs(unittest.TestCase):
             self.skipTest("Kinked PDB test files not available")
 
         # Test with first available kinked PDB
-        kinked_pdbs = list(self.kinked_pdbs_dir.glob("*.pdb"))
-        pdb_path = kinked_pdbs[0]
+        pdb_path = self.kinked_pdbs_dir / "9bsv.pdb"
 
         result = classify_structure(str(pdb_path))
 
@@ -129,8 +128,7 @@ class TestStructureClassifierWithPDBs(unittest.TestCase):
             self.skipTest("Extended PDB test files not available")
 
         # Test with first available extended PDB
-        extended_pdbs = list(self.extended_pdbs_dir.glob("*.pdb"))
-        pdb_path = extended_pdbs[0]
+        pdb_path = self.extended_pdbs_dir / "9bdo.pdb"
 
         result = classify_structure(str(pdb_path))
 

@@ -5,7 +5,7 @@ All notable changes to NbFrame are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-09-16
 
 ### Added
 - Check observed heavy-atom completeness and backbone continuity around CDR3,
@@ -43,10 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   digest; multi-character chain IDs use `.cif`.
 - Direct callers of `renumber_structure_to_aho(..., temp_dir=None)` own cleanup
   of the returned directory. High-level APIs still clean up automatically.
-- Models, feature coefficients, classification thresholds, sequence deduplication,
-  and first-model selection are unchanged.
+- Reliability fixes do not retrain either model or change the bundled thresholds.
+  The structure model update below was trained on 2026-06-13. First-model
+  selection remains unchanged.
+- All structural copies are now retained by default. Optional grouping occurs
+  after classification, keeps every copy result, and selects a usable copy
+  before comparing framework RMSD.
+- High-level structure classification retains framework-filter failures as
+  `filtered` records; non-strict input failures return `error` records.
+- Thresholds and RMSD limits are validated before processing, and structure
+  threshold defaults come from model metadata.
+- Single-sequence CSV now includes labels; all CSV exports include status and
+  error columns. All-invalid CLI runs save reports before exiting with code 1.
+- scikit-learn is pinned to 1.7.2 to match the bundled serialized models.
+- Added automated tests and isolated built-wheel installation checks on Linux
+  and macOS. Package discovery now excludes unrelated top-level directories.
 
-## [0.3.0] - 2026-06-13
+### Structure model update (trained 2026-06-13)
 
 Structure classifier feature overhaul, retrained on an expanded expert-labeled
 set. Resolves cases where a CDR3 made a clear, localized contact with FR2 but was
@@ -112,6 +125,6 @@ an X-ray refinement ensemble.
 ### Fixed
 - `contact_density` divided by non-stem CDR3 length to match the trained model.
 
-[0.3.0]: https://github.com/
-[0.2.0]: https://github.com/
-[0.1.1]: https://github.com/
+[0.3.0]: https://github.com/Mateusz-Jaskolowski/NbFrame/releases/tag/v0.3.0
+[0.2.0]: https://github.com/Mateusz-Jaskolowski/NbFrame/releases/tag/v0.2.0
+[0.1.1]: https://github.com/Mateusz-Jaskolowski/NbFrame/releases/tag/v0.1.1

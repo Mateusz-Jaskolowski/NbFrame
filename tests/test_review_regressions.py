@@ -300,7 +300,8 @@ def test_f12_all_chains_filtered_cli_has_actionable_message():
         result=CliRunner().invoke(app,['classify-structure','-p',str(PDB),'--rmsd-threshold','0'])
     assert result.exit_code == 1
     assert not isinstance(result.exception,StopIteration)
-    assert 'no chains passed framework quality filtering' in result.output
+    assert 'prediction withheld (filtered)' in result.output
+    assert 'framework RMSD' in result.output
 
 
 def test_f12_zero_progress_is_rejected_before_work(tmp_path):

@@ -4,7 +4,7 @@
 
 import json
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict
 
 import pandas as pd
 import typer
@@ -15,7 +15,6 @@ from .sequence_predictor import (
     predict_kink_probability,
     predict_from_fasta,
     classify_sequence as classify_sequence_api,
-    classify_sequences,
 )
 from .sequence_config import (
     DEFAULT_SEQ_KINKED_THRESHOLD,
@@ -30,8 +29,10 @@ from .structure_config import (
 )
 from .structure_classifier import (
     classify_all_nanobodies_in_pdb,
-    classify_structure as classify_structure_api,
+    resolve_structure_thresholds,
 )
+
+from .validation import validate_thresholds, validate_rmsd_threshold
 
 app = typer.Typer(
     help="NbFrame: Classify nanobody CDR3 conformation as kinked or extended from sequence and/or structure.",
@@ -46,6 +47,9 @@ def _strip_features(obj: Dict[str, object], summary_only: bool) -> Dict[str, obj
         return obj
     slim = dict(obj)
     slim.pop("features", None)
+    if "sequence_group" in slim:
+        slim["sequence_group"] = dict(slim["sequence_group"])
+        slim["sequence_group"]["results"] = [_strip_features(r, True) for r in slim["sequence_group"]["results"]]
     return slim
 
 
@@ -166,6 +170,12 @@ def classify_sequence_cmd(
         typer.echo("Error: provide exactly one of --sequence or --fasta", err=True)
         raise typer.Exit(code=2)
 
+    try:
+        kinked_threshold, extended_threshold = validate_thresholds(kinked_threshold, extended_threshold)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
     if sequence is not None:
         if label:
             # Use classification with labels
@@ -180,7 +190,6 @@ def classify_sequence_cmd(
 
             if result.get("error"):
                 typer.echo(f"Error: {result['error']}", err=True)
-                raise typer.Exit(code=1)
 
             if result.get("probability") is not None and not output_csv:
                 label_str = result.get("label", "unknown")
@@ -203,7 +212,6 @@ def classify_sequence_cmd(
 
             if result.get("error"):
                 typer.echo(f"Error: {result['error']}", err=True)
-                raise typer.Exit(code=1)
 
             if result.get("probability") is not None and not output_csv:
                 # Raw probability output (no label mode)
@@ -218,6 +226,9 @@ def classify_sequence_cmd(
             except Exception as e:
                 typer.echo(f"Error saving CSV file: {e}", err=True)
                 raise typer.Exit(code=1)
+
+        if result.get("probability") is None:
+            raise typer.Exit(code=1)
 
     else:
         try:
@@ -289,6 +300,11 @@ def classify_sequence_cmd(
 
                 # Print threshold info after table
                 console.print(f"\n[dim]Thresholds: kinked >{kinked_threshold:.2f}, extended <{extended_threshold:.2f}[/dim]")
+            if not df["nbframe_score"].notna().any():
+                typer.echo("No predictions were produced; input error reports were retained.", err=True)
+                raise typer.Exit(code=1)
+        except typer.Exit:
+            raise
         except Exception as e:
             typer.echo(f"Error processing FASTA file: {e}", err=True)
             raise typer.Exit(code=1)
@@ -329,6 +345,7 @@ def classify_structure_cmd(
         "--output-aho-pdb",
         help="Directory for AHo-numbered structures (mmCIF for multi-character chain IDs)",
     ),
+    unique_sequences: bool = typer.Option(False, "--unique-sequences", help="Group identical sequences after classifying every copy; retain all copy results."),
     summary_only: bool = typer.Option(
         False,
         "--summary-only",
@@ -363,13 +380,13 @@ def classify_structure_cmd(
         "--no-rmsd-filter",
         help="Disable RMSD-based quality filtering.",
     ),
-    kinked_threshold: float = typer.Option(
-        DEFAULT_STRUCT_KINKED_THRESHOLD,
+    kinked_threshold: Optional[float] = typer.Option(
+        None,
         "--kinked-threshold",
         help=f"Probability threshold above which to classify as 'kinked' (default: {DEFAULT_STRUCT_KINKED_THRESHOLD}).",
     ),
-    extended_threshold: float = typer.Option(
-        DEFAULT_STRUCT_EXTENDED_THRESHOLD,
+    extended_threshold: Optional[float] = typer.Option(
+        None,
         "--extended-threshold",
         help=f"Probability threshold below which to classify as 'extended' (default: {DEFAULT_STRUCT_EXTENDED_THRESHOLD}).",
     ),
@@ -403,364 +420,89 @@ def classify_structure_cmd(
         )
         raise typer.Exit(code=2)
 
-    all_rows: List[Dict[str, object]] = []
-    json_written = False
-    csv_written = False
+    try:
+        kinked_threshold, extended_threshold = resolve_structure_thresholds(kinked_threshold, extended_threshold)
+        validate_rmsd_threshold(rmsd_threshold)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
 
-    classified_count = 0
-
-    # Single-PDB mode
+    chain_ids = None if chain is None else [c.strip() for c in chain.split(",") if c.strip()]
+    if chain_ids == []:
+        typer.echo("Error: --chain must contain at least one chain ID.", err=True)
+        raise typer.Exit(code=2)
     if pdb is not None:
-        pdb_path = pdb
-        errors_by_chain: Dict[str, str] = {}
-
-        try:
-            if chain is not None:
-                # Allow comma-separated list of chains, e.g. "--chain A,B,G".
-                chain_ids = [c.strip() for c in chain.split(",") if c.strip()]
-                results_by_chain: Dict[str, Dict[str, object]] = {}
-
-                filter_rmsd = not no_rmsd_filter
-                for cid in chain_ids:
-                    try:
-                        res = classify_structure_api(
-                            pdb_path=pdb_path,
-                            chain_id=cid,
-                            save_pdb=output_aho_dir is not None,
-                            aho_output_dir=output_aho_dir,
-                            filter_by_rmsd=filter_rmsd,
-                            rmsd_threshold=rmsd_threshold,
-                            kinked_threshold=kinked_threshold,
-                            extended_threshold=extended_threshold,
-                        )
-                        if res is not None:
-                            results_by_chain[cid] = res
-                        else:
-                            errors_by_chain[cid] = f"Failed framework quality filter (RMSD limit {rmsd_threshold} Å or insufficient coverage)"
-                    except Exception as exc:  # noqa: BLE001 - report per-chain failure
-                        errors_by_chain[cid] = str(exc)
-
-                if not results_by_chain:
-                    typer.echo(
-                        "Error: none of the requested chains "
-                        f"({', '.join(chain_ids)}) could be classified "
-                        f"for PDB {pdb_path!r}.",
-                        err=True,
-                    )
-                    raise typer.Exit(code=1)
-            else:
-                # Classify all detected VHH-like nanobody chains in the PDB,
-                # collapsing identical sequences by default.
-                filter_rmsd = not no_rmsd_filter
-                results_by_chain = classify_all_nanobodies_in_pdb(
-                    pdb_path=pdb_path,
-                    unique_sequences=True,
-                    save_pdb=output_aho_dir is not None,
-                    aho_output_dir=output_aho_dir,
-                    filter_by_rmsd=filter_rmsd,
-                    rmsd_threshold=rmsd_threshold,
-                    kinked_threshold=kinked_threshold,
-                    extended_threshold=extended_threshold,
-                )
-                errors_by_chain = {}
-        except typer.Exit:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            typer.echo(f"Error during structure classification: {exc}", err=True)
-            raise typer.Exit(code=1)
-
-        if not results_by_chain:
-            typer.echo(
-                f"Error: no chains passed framework quality filtering for {pdb_path!r} "
-                f"(RMSD limit {rmsd_threshold} Å or insufficient framework coverage).",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-
-        # Verbose model info (using the first successful result).
-        first_result = next(iter(results_by_chain.values()))
-        if verbose:
-            console.log(
-                f"Model: {first_result['model_info'].get('model_file')} "
-                f"(trained {first_result['model_info'].get('date_trained')})"
-            )
-            typer.echo("")  # blank line after model info
-
-        # If requested, write full JSON result to disk for downstream tooling.
-        if output_json:
-            try:
-                if len(results_by_chain) == 1:
-                    only_res = next(iter(results_by_chain.values()))
-                    payload = _strip_features(only_res, summary_only)
-                else:
-                    payload = {
-                        cid: _strip_features(res, summary_only)
-                        for cid, res in results_by_chain.items()
-                    }
-
-                with open(output_json, "w", encoding="utf-8") as f:
-                    json.dump(payload, f, indent=2)
-                json_written = True
-            except Exception as exc:  # noqa: BLE001
-                typer.echo(f"Error writing JSON output: {exc}", err=True)
-                raise typer.Exit(code=1)
-
-        # Report any chains that could not be classified.
-        for cid, msg in errors_by_chain.items():
-            typer.echo(
-                f"Chain {cid}: skipped (could not classify: {msg})",
-                err=True,
-            )
-
-        # Always print a concise, human-readable summary to stdout.
-        multi = len(results_by_chain) > 1
-        if chain is not None:
-            header = "User-provided chains requested for classification:"
-        else:
-            header = "Chains identified as VHH in the provided PDB:"
-        typer.echo(header)
-
-        for cid, result in results_by_chain.items():
-            label = result.get("label")
-            probs = result.get("probabilities", {})
-            p_kink = probs.get("kinked")
-
-            if p_kink is not None:
-                if multi:
-                    # Multiple chains: use compact format
-                    label_styled, color = _get_label_style(label)
-                    console.print(f"\n  Chain {cid}:")
-                    console.print(f"    Prediction:  {label_styled}")
-                    console.print(f"    P(kinked):   [bold]{p_kink:.4f}[/bold]")
-                    if label == "uncertain":
-                        explanation = STRUCT_UNCERTAINTY_EXPLANATION.format(
-                            extended=extended_threshold,
-                            kinked=kinked_threshold,
-                        )
-                        console.print(f"    [dim]Note: {explanation}[/dim]")
-                else:
-                    # Single chain: use full format
-                    _print_single_structure_prediction(
-                        chain_id=cid,
-                        label=label,
-                        probability=p_kink,
-                        kinked_threshold=kinked_threshold,
-                        extended_threshold=extended_threshold,
-                        verbose=verbose,
-                    )
-            else:
-                report = result.get("quality", {})
-                issues = report.get("issues", [])
-                reason = issues[0]["message"] if issues else result.get("error", "Required measurements are unavailable.")
-                typer.echo(f"Chain {cid}: prediction withheld (insufficient structural data). {reason}")
-
-        # Print thresholds at the end if multiple chains
-        if multi:
-            console.print(f"\n[dim]Thresholds: kinked >{kinked_threshold:.2f}, extended <{extended_threshold:.2f}[/dim]")
-
-        # Accumulate rows for CSV output.
-        for cid, result in results_by_chain.items():
-            label = result.get("label")
-            probs = result.get("probabilities", {})
-            p_kink = probs.get("kinked")
-            p_ext = probs.get("extended")
-
-            row: Dict[str, object] = {
-                "pdb_path": pdb_path,
-                "pdb_name": Path(pdb_path).name,
-                "chain_id": cid,
-                "label": label,
-                "prob_kinked": p_kink,
-                "prob_extended": p_ext,
-                "status": result.get("status"),
-                "error": result.get("error"),
-                "model_id": result.get("model_id_used"),
-                "warnings": json.dumps(result.get("warnings", [])),
-                "quality": json.dumps(result.get("quality", {})),
-            }
-            # Optionally flatten features into the row.
-            if not summary_only:
-                features = result.get("features") or {}
-                for k, v in features.items():
-                    row[f"feature_{k}"] = v
-            all_rows.append(row)
-            classified_count += int(result.get("status") == "classified")
-
-    # Directory mode
+        files = [Path(pdb)]
     else:
-        dir_path = Path(pdb_dir or "")
-        if not dir_path.is_dir():
+        directory = Path(pdb_dir)
+        if not directory.is_dir():
             typer.echo(f"Error: {pdb_dir!r} is not a directory.", err=True)
             raise typer.Exit(code=1)
-
-        file_iter = dir_path.rglob("*") if recursive else dir_path.glob("*")
-        pdb_files = sorted(p for p in file_iter if p.is_file() and p.suffix.lower() in {".pdb", ".ent", ".cif", ".mmcif"})
-        if not pdb_files:
-            typer.echo(
-                f"Error: no PDB/mmCIF files found in directory {pdb_dir!r}.",
-                err=True,
-            )
+        candidates = directory.rglob("*") if recursive else directory.glob("*")
+        files = sorted(p for p in candidates if p.is_file() and p.suffix.lower() in {".pdb", ".ent", ".cif", ".mmcif"})
+        if not files:
+            typer.echo(f"Error: no PDB/mmCIF files found in directory {pdb_dir!r}.", err=True)
             raise typer.Exit(code=1)
+        typer.echo(f"Detected {len(files)} structures in {directory}, starting processing...")
 
-        # Initial summary so the user sees immediate feedback before the first
-        # progress or per-PDB output.
-        filter_rmsd = not no_rmsd_filter
-        typer.echo(
-            f"Detected {len(pdb_files)} PDBs in {dir_path}, starting processing..."
-        )
-        if filter_rmsd:
-            typer.echo(
-                f"RMSD filtering enabled (threshold: {rmsd_threshold} Å)"
-            )
+    all_results = {}
+    all_rows = []
+    classified_count = success_count = failure_count = filtered_count = 0
+    for processed, path in enumerate(files, 1):
+        results = classify_all_nanobodies_in_pdb(
+            str(path), chain_ids=chain_ids, unique_sequences=unique_sequences,
+            strict=False, save_pdb=output_aho_dir is not None, aho_output_dir=output_aho_dir,
+            filter_by_rmsd=not no_rmsd_filter, rmsd_threshold=rmsd_threshold,
+            kinked_threshold=kinked_threshold, extended_threshold=extended_threshold)
+        all_results[str(path)] = {cid: _strip_features(r, summary_only) for cid, r in results.items()}
+        statuses = [r["status"] for r in results.values()]
+        success_count += int("classified" in statuses)
+        filtered_count += int(all(status == "filtered" for status in statuses))
+        failure_count += int("classified" not in statuses and not all(status == "filtered" for status in statuses))
+        for result in results.values():
+            cid = result["chain_id_used"]
+            status = result["status"]
+            classified_count += int(status == "classified")
+            if status != "classified":
+                typer.echo(f"{path.name}, chain {cid or '(undetermined)'}: prediction withheld ({status}). {result.get('error')}", err=True)
+            elif pdb is not None or verbose:
+                _print_single_structure_prediction(cid, result["label"], result["prob_kinked"],
+                    kinked_threshold, extended_threshold, verbose)
+            if result.get("sequence_group", {}).get("label_disagreement"):
+                typer.echo(f"{path.name}, chain group {result['sequence_group']['chain_ids']}: copies have different labels; inspect all copy results.", err=True)
+            if verbose:
+                console.log(f"Model: {result['model_info']['model_file']} (trained {result['model_info']['date_trained']})")
+            row = dict(pdb_path=str(path), pdb_name=path.name, chain_id=cid,
+                label=result["label"], prob_kinked=result["prob_kinked"], prob_extended=result["prob_extended"],
+                status=status, error=result.get("error"), model_id=result.get("model_id_used"),
+                warnings=json.dumps(result.get("warnings", [])), quality=json.dumps(result.get("quality", {})))
+            if unique_sequences:
+                row["sequence_group"] = json.dumps(_strip_features(result, summary_only).get("sequence_group"))
+            if not summary_only:
+                row.update({f"feature_{k}": v for k, v in result.get("features", {}).items()})
+            all_rows.append(row)
+        if pdb_dir and (processed % progress_interval == 0 or processed == len(files)):
+            typer.echo(f"[nbframe] Processed {processed}/{len(files)} structures (successes={success_count}, rmsd_filtered={filtered_count}, failures={failure_count})", err=True)
 
-        all_results_for_json: Dict[str, Dict[str, Dict[str, object]]] = {}
-        any_success = False
-        total_files = len(pdb_files)
-        processed = 0
-        success_count = 0
-        failure_count = 0
-        rmsd_filtered_count = 0
-
-        for pdb_file in pdb_files:
-            pdb_path = str(pdb_file)
-            try:
-                results_by_chain = classify_all_nanobodies_in_pdb(
-                    pdb_path=pdb_path,
-                    unique_sequences=True,
-                    save_pdb=output_aho_dir is not None,
-                    aho_output_dir=output_aho_dir,
-                    filter_by_rmsd=filter_rmsd,
-                    rmsd_threshold=rmsd_threshold,
-                    kinked_threshold=kinked_threshold,
-                    extended_threshold=extended_threshold,
-                )
-            except Exception as exc:  # noqa: BLE001
-                failure_count += 1
-                typer.echo(
-                    f"[nbframe] WARNING: failed to classify {pdb_path!r}: {exc}",
-                    err=True,
-                )
-                processed += 1
-            else:
-                processed += 1
-                if not results_by_chain:
-                    # All chains were filtered (likely by RMSD)
-                    rmsd_filtered_count += 1
-                    continue
-
-                any_success = True  # A report exists, including withheld predictions.
-                if any(r.get("status") == "classified" for r in results_by_chain.values()):
-                    success_count += 1
-                else:
-                    failure_count += 1
-                all_results_for_json[pdb_path] = results_by_chain
-                for cid, result in results_by_chain.items():
-                    if result.get("status") == "insufficient_quality":
-                        typer.echo(f"[nbframe] {pdb_file.name}, chain {cid}: prediction withheld (insufficient structural data).", err=True)
-
-                # Only print per-PDB summaries when verbose; otherwise rely on
-                # periodic progress updates and CSV/JSON outputs.
-                if verbose:
-                    multi = len(results_by_chain) > 1
-                    console.print(f"\n[bold]{pdb_file.name}[/bold]")
-                    for cid, result in results_by_chain.items():
-                        label = result.get("label")
-                        probs = result.get("probabilities", {})
-                        p_kink = probs.get("kinked")
-
-                        if p_kink is not None:
-                            label_styled, color = _get_label_style(label)
-                            prefix = f"  Chain {cid}: " if multi else "  "
-                            console.print(f"{prefix}{label_styled} (P_kinked={p_kink:.4f})")
-                        else:
-                            typer.echo(f"  Chain {cid}: prediction withheld (insufficient structural data).")
-
-                # Accumulate rows for CSV output regardless of verbosity.
-                for cid, result in results_by_chain.items():
-                    label = result.get("label")
-                    probs = result.get("probabilities", {})
-                    p_kink = probs.get("kinked")
-                    p_ext = probs.get("extended")
-
-                    row: Dict[str, object] = {
-                        "pdb_path": pdb_path,
-                        "pdb_name": pdb_file.name,
-                        "chain_id": cid,
-                        "label": label,
-                        "prob_kinked": p_kink,
-                        "prob_extended": p_ext,
-                        "status": result.get("status"),
-                        "error": result.get("error"),
-                        "model_id": result.get("model_id_used"),
-                        "warnings": json.dumps(result.get("warnings", [])),
-                        "quality": json.dumps(result.get("quality", {})),
-                    }
-                    if not summary_only:
-                        features = result.get("features") or {}
-                        for k, v in features.items():
-                            row[f"feature_{k}"] = v
-                    all_rows.append(row)
-                    classified_count += int(result.get("status") == "classified")
-
-            # Progress reporting to stderr every progress_interval files.
-            if processed % progress_interval == 0 or processed == total_files:
-                typer.echo(
-                    f"[nbframe] Processed {processed}/{total_files} PDBs "
-                    f"(successes={success_count}, rmsd_filtered={rmsd_filtered_count}, "
-                    f"failures={failure_count})",
-                    err=True,
-                )
-
-        if not any_success:
-            msg = f"Error: no PDBs in {pdb_dir!r} could be successfully classified."
-            if rmsd_filtered_count > 0:
-                msg += f" ({rmsd_filtered_count} filtered by RMSD threshold)"
-            typer.echo(msg, err=True)
-            raise typer.Exit(code=1)
-
-        # If requested, write aggregated JSON results for the directory.
+    try:
         if output_json:
-            try:
-                payload_dir: Dict[str, Dict[str, Dict[str, object]]] = {}
-                for path_str, by_chain in all_results_for_json.items():
-                    payload_dir[path_str] = {
-                        cid: _strip_features(res, summary_only) for cid, res in by_chain.items()
-                    }
-
-                with open(output_json, "w", encoding="utf-8") as f:
-                    json.dump(payload_dir, f, indent=2)
-                json_written = True
-            except Exception as exc:  # noqa: BLE001
-                typer.echo(f"Error writing JSON output: {exc}", err=True)
-                raise typer.Exit(code=1)
-
-    # Optional CSV output (both single-PDB and directory modes).
-    if output_csv and all_rows:
-        try:
-            df = pd.DataFrame(all_rows)
-            df.to_csv(output_csv, index=False)
-            csv_written = True
-        except Exception as exc:  # noqa: BLE001
-            typer.echo(f"Error writing CSV output: {exc}", err=True)
-            raise typer.Exit(code=1)
-
-    # Final, tidy summary of output locations.
-    outputs: List[str] = []
-    if json_written and output_json:
-        outputs.append(f"\tStructure classification JSON: {output_json}")
-    if csv_written and output_csv:
-        outputs.append(f"\tClassification CSV summary: {output_csv}")
-    if output_aho_dir:
-        outputs.append(f"\tAHo-numbered VHH structures: {output_aho_dir}")
-
-    if outputs:
-        typer.echo("")
-        typer.echo("Outputs:")
-        for line in outputs:
-            typer.echo(line)
-
+            payload = all_results
+            if pdb is not None:
+                payload = next(iter(all_results.values()))
+                if len(payload) == 1:
+                    payload = next(iter(payload.values()))
+            Path(output_json).write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
+            typer.echo(f"Structure classification JSON: {output_json}", err=True)
+        if output_csv:
+            pd.DataFrame(all_rows).to_csv(output_csv, index=False)
+            typer.echo(f"Classification CSV summary: {output_csv}", err=True)
+        if output_aho_dir:
+            typer.echo(f"AHo-numbered VHH structures: {output_aho_dir}", err=True)
+    except Exception as exc:
+        typer.echo(f"Error writing output: {exc}", err=True)
+        raise typer.Exit(code=1)
     if classified_count == 0:
-        typer.echo("No predictions were produced; structural quality reports were retained.", err=True)
+        typer.echo("No predictions were produced; input and structural quality reports were retained.", err=True)
         raise typer.Exit(code=1)
 
 

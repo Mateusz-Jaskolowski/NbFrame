@@ -51,6 +51,8 @@ from .structure_config import (
     DEFAULT_RMSD_THRESHOLD,
     REFERENCE_VHH_PDB,
 )
+from .validation import validate_rmsd_threshold
+
 from .structure_features import (
     StructureFeatureDict,
     STRUCTURE_FEATURE_COLUMNS,
@@ -144,6 +146,8 @@ def parse_pdb_chains(pdb_path: str) -> Dict[str, ChainInfo]:
     structure = parser.get_structure("nbframe_structure", pdb_path)
 
     # Use first model only – nanobody structures are almost always single-model.
+    if not len(structure):
+        raise ValueError(f"No coordinate models found in structure {pdb_path!r}.")
     model: Model = structure[0]
 
     chains: Dict[str, ChainInfo] = {}
@@ -809,6 +813,7 @@ def compute_features_for_pdbs(
     filter_by_rmsd: bool = True,
     rmsd_threshold: float = DEFAULT_RMSD_THRESHOLD,
     reference_pdb_path: Optional[str] = None,
+    _retain_filtered: bool = False,
 ) -> List[StructureFeatureDict]:
     """
     Batch version of :func:`compute_features_from_pdb`.
@@ -849,6 +854,7 @@ def compute_features_for_pdbs(
         Note: the returned list may be shorter than ``pdb_paths`` if structures
         are filtered out.
     """
+    validate_rmsd_threshold(rmsd_threshold)
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer.")
     if chain_ids is not None and len(chain_ids) != len(pdb_paths):
@@ -933,6 +939,13 @@ def compute_features_for_pdbs(
                         reason = ("insufficient matching framework CA coverage" if framework_rmsd is None
                                   else f"framework RMSD {framework_rmsd:.2f} Å exceeds {rmsd_threshold} Å")
                         warnings.warn(f"Filtered {pdb_path}, chain {selected_chain_id}: {reason}.", UserWarning)
+                        if _retain_filtered:
+                            all_features.append({
+                                "framework_rmsd": framework_rmsd,
+                                "processing_status": "filtered",
+                                "processing_error": reason,
+                                "quality": {"status": "not_assessed", "chain_id": selected_chain_id, "model_id": 0},
+                            })
                         continue
 
                 feats = compute_structure_features(
@@ -1174,5 +1187,4 @@ __all__ = [
     "compute_features_for_pdbs",
     "compute_features_for_pdb_directory",
 ]
-
 

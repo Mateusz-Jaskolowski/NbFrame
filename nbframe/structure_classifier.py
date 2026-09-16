@@ -27,11 +27,12 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import json
 import math
 from numbers import Real
-import warnings
 
 import joblib
 import numpy as np
 from importlib import resources
+
+from .validation import validate_thresholds, validate_rmsd_threshold
 
 from .structure_config import (
     DEFAULT_STRUCT_KINKED_THRESHOLD as DEFAULT_KINKED_THRESHOLD,
@@ -41,7 +42,7 @@ from .structure_config import (
 from .structure_numbering import (
     compute_features_for_pdbs,
     identify_nanobody_chains_from_pdb,
-    identify_unique_nanobody_chains_from_pdb,
+    parse_pdb_chains,
 )
 
 
@@ -124,10 +125,7 @@ def load_structure_classifier(verbose: bool = False) -> Tuple[Any, StructureMode
     model_pkg_path = f"data/{meta.model_file}"
     try:
         with resources.files("nbframe").joinpath(model_pkg_path).open("rb") as f:
-            # Suppress sklearn version mismatch warnings - the model is robust to minor version differences
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-                clf = joblib.load(f)
+            clf = joblib.load(f)
     except FileNotFoundError as exc:  # pragma: no cover - packaging error
         raise RuntimeError(
             f"Structure classifier model file {meta.model_file!r} not found "
@@ -144,6 +142,38 @@ def load_structure_classifier(verbose: bool = False) -> Tuple[Any, StructureMode
         )
 
     return clf, meta
+
+
+def resolve_structure_thresholds(kinked=None, extended=None):
+    """Use bundled model metadata for unspecified thresholds; validate overrides."""
+    meta = _load_metadata()
+    return validate_thresholds(meta.kinked_threshold if kinked is None else kinked,
+                               meta.extended_threshold if extended is None else extended)
+
+
+def _failure_result(pdb_path, chain_id, status, error, *, features=None, quality=None,
+                    kinked_threshold=None, extended_threshold=None):
+    meta = _load_metadata()
+    kinked, extended = resolve_structure_thresholds(kinked_threshold, extended_threshold)
+    return dict(pdb_path=str(pdb_path), chain_id_used=chain_id,
+                model_id_used=(quality or {}).get("model_id"), status=status,
+                error=str(error), warnings=[str(error)], label=None, confidence=None,
+                prob_kinked=None, prob_extended=None,
+                probabilities={"kinked": None, "extended": None}, features=features or {},
+                quality=quality or {"status": "not_assessed"},
+                model_info=dict(model_file=meta.model_file, date_trained=meta.date_trained,
+                                feature_cols=meta.feature_cols, train_csv=meta.train_csv,
+                                performance=meta.performance,
+                                thresholds={"kinked": kinked, "extended": extended}))
+
+
+def _result_rank(result):
+    # Select using applicability and coordinate quality, never model confidence.
+    status_order = {"classified": 0, "insufficient_quality": 1, "filtered": 2, "error": 3}
+    rmsd = result.get("features", {}).get("framework_rmsd")
+    return (status_order.get(result["status"], 4),
+            rmsd if isinstance(rmsd, Real) and math.isfinite(rmsd) else math.inf,
+            result.get("chain_id_used") or "")
 
 
 def prepare_feature_vector(
@@ -215,10 +245,10 @@ def predict_structure_from_features(
         If False, return argmax label (binary kinked/extended).
     kinked_threshold
         Probability threshold above which to classify as "kinked".
-        If None, uses DEFAULT_KINKED_THRESHOLD (0.55).
+        If None, uses the bundled model metadata (currently 0.55).
     extended_threshold
         Probability threshold below which to classify as "extended".
-        If None, uses DEFAULT_EXTENDED_THRESHOLD (0.25).
+        If None, uses the bundled model metadata (currently 0.25).
 
     Returns
     -------
@@ -250,8 +280,7 @@ def predict_structure_from_features(
         If the classifier or metadata cannot be loaded.
     """
     clf, meta = load_structure_classifier()
-    effective_kinked_threshold = kinked_threshold if kinked_threshold is not None else DEFAULT_KINKED_THRESHOLD
-    effective_extended_threshold = extended_threshold if extended_threshold is not None else DEFAULT_EXTENDED_THRESHOLD
+    effective_kinked_threshold, effective_extended_threshold = resolve_structure_thresholds(kinked_threshold, extended_threshold)
     model_info = {
         "model_file": meta.model_file,
         "date_trained": meta.date_trained,
@@ -372,7 +401,7 @@ def classify_structure(
     kinked_threshold: Optional[float] = None,
     extended_threshold: Optional[float] = None,
     strict: bool = True,
-) -> Optional[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
     Run the full PDB → AHo → features → classification pipeline.
 
@@ -381,8 +410,9 @@ def classify_structure(
     pdb_path
         Path to the raw (non-AHo-numbered) nanobody PDB file.
     chain_id
-        Optional chain identifier; if None, heuristics are used to identify
-        the most likely VHH-like nanobody chain.
+        Optional chain identifier. If None, evaluate all eligible copies and select
+        by usable prediction, then framework RMSD, then chain ID. The result
+        includes a selection report; use the multi-chain API to retain all copies.
     save_pdb
         If True, keep the intermediate AHo-numbered PDB on disk (in
         ``aho_output_dir`` if provided, otherwise the current working dir).
@@ -402,22 +432,22 @@ def classify_structure(
         If False, return binary argmax label.
     kinked_threshold
         Probability threshold above which to classify as "kinked".
-        If None, uses DEFAULT_KINKED_THRESHOLD (0.55).
+        If None, uses the bundled model metadata (currently 0.55).
     extended_threshold
         Probability threshold below which to classify as "extended".
-        If None, uses DEFAULT_EXTENDED_THRESHOLD (0.25).
+        If None, uses the bundled model metadata (currently 0.25).
     strict
         If True (default), raise ValueError when no VHH chain is found.
-        If False, return None with a warning instead.
+        If False, retain input/processing failures as status="error" records.
+        Invalid configuration always raises ValueError.
 
     Returns
     -------
-    dict or None
-        Result dictionary combining structural features, quality, and classifier
-        output. Coordinate-quality failures return status="insufficient_quality"
-        with no label/probability and an explanatory report. Returns None if:
-        - The structure was filtered out by RMSD threshold
-        - No VHH chain was found (when strict=False)
+    dict
+        Result dictionary combining features, quality, and classifier output.
+        Coordinate-quality failures have status="insufficient_quality"; framework
+        filter failures have status="filtered". Both retain reasons without a
+        label/probability. Processing failures raise unless strict=False.
 
         Keys include:
         - "label": "kinked" | "extended" | "uncertain"
@@ -425,65 +455,46 @@ def classify_structure(
         - "prob_kinked": float
         - "prob_extended": float
     """
-    # First compute structural features from the raw PDB. We go via the batch
-    # helper so that ``aho_output_dir`` can be honoured when saving AHo PDBs.
+    kinked_threshold, extended_threshold = resolve_structure_thresholds(kinked_threshold, extended_threshold)
+    validate_rmsd_threshold(rmsd_threshold)
+    if chain_id is None:
+        candidates = classify_all_nanobodies_in_pdb(
+            pdb_path, unique_sequences=False, save_pdb=save_pdb, aho_output_dir=aho_output_dir,
+            filter_by_rmsd=filter_by_rmsd, rmsd_threshold=rmsd_threshold,
+            use_confidence_thresholds=use_confidence_thresholds,
+            kinked_threshold=kinked_threshold, extended_threshold=extended_threshold, strict=strict)
+        selected = dict(min(candidates.values(), key=_result_rank))
+        selected["selection"] = {"candidate_chain_ids": [r["chain_id_used"] for r in candidates.values()],
+                                 "rule": "usable_prediction_then_framework_rmsd_then_chain_id"}
+        return selected
     try:
         features_list = compute_features_for_pdbs(
-            [pdb_path],
-            chain_ids=[chain_id] if chain_id is not None else None,
-            save_pdb=save_pdb,
-            batch_size=1,
-            aho_output_dir=aho_output_dir,
-            verbose=False,
-            filter_by_rmsd=filter_by_rmsd,
-            rmsd_threshold=rmsd_threshold,
-        )
-    except ValueError as e:
-        # Handle "no VHH chain found" errors
-        if not strict:
-            import warnings
-            warnings.warn(f"Could not classify {pdb_path}: {e}")
-            return None
-        raise
-
-    if not features_list:
-        # Structure was filtered out by RMSD
-        return None
-
-    feature_dict = features_list[0]
-
-    pred = predict_structure_from_features(
-        feature_dict,
-        use_confidence_thresholds=use_confidence_thresholds,
-        kinked_threshold=kinked_threshold,
-        extended_threshold=extended_threshold,
-    )
-
-    result: Dict[str, Any] = {
-        "pdb_path": pdb_path,
-        "chain_id_used": pred["quality"].get("chain_id", chain_id),
-        "features": pred["features"],
-        "label": pred["label"],
-        "confidence": pred["confidence"],
-        "probabilities": pred["probabilities"],
-        "prob_kinked": pred["probabilities"]["kinked"],
-        "prob_extended": pred["probabilities"]["extended"],
-        "model_info": pred["model_info"],
-        "warnings": pred["warnings"],
-        "status": pred["status"],
-        "error": pred["error"],
-        "quality": pred["quality"],
-        "model_id_used": pred["quality"].get("model_id"),
-    }
-
-    return result
+            [pdb_path], chain_ids=[chain_id], save_pdb=save_pdb, batch_size=1,
+            aho_output_dir=aho_output_dir, verbose=False, filter_by_rmsd=filter_by_rmsd,
+            rmsd_threshold=rmsd_threshold, _retain_filtered=True)
+        feature_dict = features_list[0]
+        if feature_dict.get("processing_status") == "filtered":
+            return _failure_result(pdb_path, chain_id, "filtered", feature_dict["processing_error"],
+                features={"framework_rmsd": feature_dict["framework_rmsd"]}, quality=feature_dict["quality"],
+                kinked_threshold=kinked_threshold, extended_threshold=extended_threshold)
+        pred = predict_structure_from_features(feature_dict,
+            use_confidence_thresholds=use_confidence_thresholds,
+            kinked_threshold=kinked_threshold, extended_threshold=extended_threshold)
+    except Exception as exc:
+        if strict:
+            raise
+        return _failure_result(pdb_path, chain_id, "error", exc,
+                               kinked_threshold=kinked_threshold, extended_threshold=extended_threshold)
+    return dict(pred, pdb_path=str(pdb_path),
+                chain_id_used=pred["quality"].get("chain_id", chain_id),
+                model_id_used=pred["quality"].get("model_id"))
 
 
 def classify_all_nanobodies_in_pdb(
     pdb_path: str,
     *,
     chain_ids: Optional[List[str]] = None,
-    unique_sequences: bool = True,
+    unique_sequences: bool = False,
     save_pdb: bool = False,
     aho_output_dir: Optional[str] = None,
     filter_by_rmsd: bool = True,
@@ -504,9 +515,10 @@ def classify_all_nanobodies_in_pdb(
         Optional explicit list of chain IDs to classify. When provided, this
         list is used directly (``unique_sequences`` is ignored).
     unique_sequences
-        If True (default), collapse chains with identical amino-acid sequences
-        and return one representative chain ID per unique sequence. If False,
-        return one result per VHH-like chain.
+        If False (default), retain every VHH-like chain. If True, classify every
+        copy before grouping identical observed sequences. Select a representative
+        by usable prediction, then framework RMSD, then chain ID; preserve all
+        copy results, probability range, and label disagreement in sequence_group.
     save_pdb
         If True, keep the intermediate AHo-numbered PDB(s) on disk (in
         ``aho_output_dir`` if provided, otherwise the current working dir).
@@ -523,90 +535,73 @@ def classify_all_nanobodies_in_pdb(
         If False, return binary argmax label.
     kinked_threshold
         Probability threshold above which to classify as "kinked".
-        If None, uses DEFAULT_KINKED_THRESHOLD (0.55).
+        If None, uses the bundled model metadata (currently 0.55).
     extended_threshold
         Probability threshold below which to classify as "extended".
-        If None, uses DEFAULT_EXTENDED_THRESHOLD (0.25).
+        If None, uses the bundled model metadata (currently 0.25).
     strict
         If True (default), raise ValueError when no VHH chains are found.
-        If False, return empty dict with a warning instead.
+        If False, return input-level failures under the reserved "__input__" key
+        with chain_id_used=None. Individual chain failures are always retained
+        as error records so other chains can finish. Invalid settings always raise.
 
     Returns
     -------
     dict
         Mapping from chain_id -> classification result dict (same schema as
         :func:`classify_structure`), for each detected VHH-like nanobody chain
-        that passes RMSD filtering, including insufficient-quality results with
-        no prediction. Returns empty dict if no VHH chains found
-        and strict=False.
+        including filtered, insufficient-quality, and failed chains. With
+        strict=False, files with no eligible chains return an input-level error.
     """
-    if chain_ids is None:
-        if unique_sequences:
-            chain_ids = identify_unique_nanobody_chains_from_pdb(pdb_path)
-        else:
+    kinked_threshold, extended_threshold = resolve_structure_thresholds(kinked_threshold, extended_threshold)
+    validate_rmsd_threshold(rmsd_threshold)
+    auto_detect = chain_ids is None
+    try:
+        if auto_detect:
             chain_ids = identify_nanobody_chains_from_pdb(pdb_path)
+        if not chain_ids:
+            raise ValueError(f"No VHH-like nanobody chains found in PDB {pdb_path!r}.")
+    except Exception as exc:
+        if strict:
+            raise
+        return {"__input__": _failure_result(pdb_path, None, "error", exc,
+            kinked_threshold=kinked_threshold, extended_threshold=extended_threshold)}
 
-    if not chain_ids:
-        if not strict:
-            import warnings
-            warnings.warn(f"No VHH-like nanobody chains found in PDB {pdb_path!r}.")
-            return {}
-        raise ValueError(
-            f"No VHH-like nanobody chains found in PDB {pdb_path!r}."
-        )
-
-    # Process each chain individually to handle RMSD filtering properly
-    results: Dict[str, Dict[str, Any]] = {}
-    for cid in chain_ids:
-        features_list = compute_features_for_pdbs(
-            [pdb_path],
-            chain_ids=[cid],
-            save_pdb=save_pdb,
-            batch_size=1,
-            aho_output_dir=aho_output_dir,
-            verbose=False,
-            filter_by_rmsd=filter_by_rmsd,
-            rmsd_threshold=rmsd_threshold,
-        )
-
-        if not features_list:
-            # Chain was filtered out by RMSD
-            continue
-
-        feats = features_list[0]
-        pred = predict_structure_from_features(
-            feats,
-            use_confidence_thresholds=use_confidence_thresholds,
-            kinked_threshold=kinked_threshold,
-            extended_threshold=extended_threshold,
-        )
-        results[cid] = {
-            "pdb_path": pdb_path,
-            "chain_id_used": cid,
-            "features": pred["features"],
-            "label": pred["label"],
-            "confidence": pred["confidence"],
-            "probabilities": pred["probabilities"],
-            "prob_kinked": pred["probabilities"]["kinked"],
-            "prob_extended": pred["probabilities"]["extended"],
-            "model_info": pred["model_info"],
-            "warnings": pred["warnings"],
-            "status": pred["status"],
-            "error": pred["error"],
-            "quality": pred["quality"],
-            "model_id_used": pred["quality"].get("model_id"),
-        }
-
+    results = {}
+    for cid in dict.fromkeys(chain_ids):
+        results[cid] = classify_structure(pdb_path, chain_id=cid, strict=False,
+            save_pdb=save_pdb, aho_output_dir=aho_output_dir, filter_by_rmsd=filter_by_rmsd,
+            rmsd_threshold=rmsd_threshold, use_confidence_thresholds=use_confidence_thresholds,
+            kinked_threshold=kinked_threshold, extended_threshold=extended_threshold)
+    if unique_sequences and auto_detect:
+        chains = parse_pdb_chains(pdb_path)
+        groups = {}
+        for cid in results:
+            groups.setdefault(chains[cid].sequence, []).append(results[cid])
+        grouped = {}
+        for copies in groups.values():
+            representative = dict(min(copies, key=_result_rank))
+            valid = [r for r in copies if r["status"] == "classified"]
+            probabilities = [r["prob_kinked"] for r in valid]
+            representative["sequence_group"] = {
+                "chain_ids": [r["chain_id_used"] for r in copies],
+                "representative_chain_id": representative["chain_id_used"],
+                "label_disagreement": len({r["label"] for r in valid}) > 1,
+                "prob_kinked_range": [min(probabilities), max(probabilities)] if probabilities else None,
+                "results": copies,
+            }
+            grouped[representative["chain_id_used"]] = representative
+        return grouped
     return results
 
 
 __all__ = [
     "StructureModelMetadata",
     "load_structure_classifier",
+    "resolve_structure_thresholds",
     "prepare_feature_vector",
     "predict_structure_from_features",
     "classify_structure",
     "classify_all_nanobodies_in_pdb",
 ]
-
 

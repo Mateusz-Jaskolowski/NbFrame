@@ -16,8 +16,10 @@ Generated with `nbframe classify-sequence -f input.fasta -o results.csv`.
 | `sequence` | Input sequence |
 | `nbframe_score` | Probability of kinked conformation — P(kinked) |
 | `raw_score` | Model logit score |
+| `status` | `classified` or `error` |
+| `error` | Failure reason, empty for successful predictions |
 | `aligned_sequence` | AHo-aligned sequence (if alignment was performed) |
-| `label` | Classification label: kinked / extended / uncertain |
+| `label` | Classification label: kinked / extended / uncertain (sequence CLI omits it with `--no-label`) |
 
 ---
 
@@ -33,11 +35,12 @@ Generated with `nbframe classify-structure -d pdb_folder/ --output-csv results.c
 | `label` | Classification label: kinked / extended / uncertain |
 | `prob_kinked` | Probability of kinked conformation |
 | `prob_extended` | Probability of extended conformation |
-| `status` | `classified` or `insufficient_quality` |
+| `status` | `classified`, `insufficient_quality`, `filtered`, or `error` |
 | `error` | Explanation when a prediction is withheld |
 | `model_id` | Selected Biopython model index (currently the first model, 0) |
 | `warnings` | JSON list of quality messages |
 | `quality` | JSON coordinate-quality report, retained with `--summary-only` |
+| `sequence_group` | With grouping enabled: JSON containing all copy results, representative, probability range, and disagreement flag |
 | `feature_*` | Structural feature columns (unless `--summary-only` is used) |
 
 Withheld predictions have empty label/probability cells. This is distinct from
@@ -99,3 +102,13 @@ For insufficient coordinates, `status` is `insufficient_quality`, `label`,
 why. Valid individual measurements remain available, while affected features
 are `null`. The CLI writes requested reports before exiting with code 1 when
 no prediction could be produced. See the [coordinate-quality policy](structure-classifier.md#coordinate-completeness-and-withheld-predictions).
+
+Single-file JSON contains one result object when there is one result, otherwise
+a mapping from chain IDs to results. Directory JSON maps input paths to these
+chain mappings. Input-level failures use the reserved `__input__` key and a null
+chain ID; CSV leaves the chain cell empty. With `--unique-sequences`, nested
+`sequence_group.results` retains every copy. `--summary-only` removes features
+from representatives and nested copies but keeps status, probabilities, and quality.
+
+Both single-sequence and FASTA CSV exports retain invalid records with empty
+scores and an error reason. All-invalid runs write the requested CSV and exit 1.
