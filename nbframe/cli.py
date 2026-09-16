@@ -407,6 +407,8 @@ def classify_structure_cmd(
     json_written = False
     csv_written = False
 
+    classified_count = 0
+
     # Single-PDB mode
     if pdb is not None:
         pdb_path = pdb
@@ -547,7 +549,10 @@ def classify_structure_cmd(
                         verbose=verbose,
                     )
             else:
-                typer.echo(f"\tChain {cid}: {result}")
+                report = result.get("quality", {})
+                issues = report.get("issues", [])
+                reason = issues[0]["message"] if issues else result.get("error", "Required measurements are unavailable.")
+                typer.echo(f"Chain {cid}: prediction withheld (insufficient structural data). {reason}")
 
         # Print thresholds at the end if multiple chains
         if multi:
@@ -567,6 +572,11 @@ def classify_structure_cmd(
                 "label": label,
                 "prob_kinked": p_kink,
                 "prob_extended": p_ext,
+                "status": result.get("status"),
+                "error": result.get("error"),
+                "model_id": result.get("model_id_used"),
+                "warnings": json.dumps(result.get("warnings", [])),
+                "quality": json.dumps(result.get("quality", {})),
             }
             # Optionally flatten features into the row.
             if not summary_only:
@@ -574,6 +584,7 @@ def classify_structure_cmd(
                 for k, v in features.items():
                     row[f"feature_{k}"] = v
             all_rows.append(row)
+            classified_count += int(result.get("status") == "classified")
 
     # Directory mode
     else:
@@ -637,9 +648,15 @@ def classify_structure_cmd(
                     rmsd_filtered_count += 1
                     continue
 
-                any_success = True
-                success_count += 1
+                any_success = True  # A report exists, including withheld predictions.
+                if any(r.get("status") == "classified" for r in results_by_chain.values()):
+                    success_count += 1
+                else:
+                    failure_count += 1
                 all_results_for_json[pdb_path] = results_by_chain
+                for cid, result in results_by_chain.items():
+                    if result.get("status") == "insufficient_quality":
+                        typer.echo(f"[nbframe] {pdb_file.name}, chain {cid}: prediction withheld (insufficient structural data).", err=True)
 
                 # Only print per-PDB summaries when verbose; otherwise rely on
                 # periodic progress updates and CSV/JSON outputs.
@@ -656,7 +673,7 @@ def classify_structure_cmd(
                             prefix = f"  Chain {cid}: " if multi else "  "
                             console.print(f"{prefix}{label_styled} (P_kinked={p_kink:.4f})")
                         else:
-                            typer.echo(f"  Chain {cid}: {result}")
+                            typer.echo(f"  Chain {cid}: prediction withheld (insufficient structural data).")
 
                 # Accumulate rows for CSV output regardless of verbosity.
                 for cid, result in results_by_chain.items():
@@ -672,12 +689,18 @@ def classify_structure_cmd(
                         "label": label,
                         "prob_kinked": p_kink,
                         "prob_extended": p_ext,
+                        "status": result.get("status"),
+                        "error": result.get("error"),
+                        "model_id": result.get("model_id_used"),
+                        "warnings": json.dumps(result.get("warnings", [])),
+                        "quality": json.dumps(result.get("quality", {})),
                     }
                     if not summary_only:
                         features = result.get("features") or {}
                         for k, v in features.items():
                             row[f"feature_{k}"] = v
                     all_rows.append(row)
+                    classified_count += int(result.get("status") == "classified")
 
             # Progress reporting to stderr every progress_interval files.
             if processed % progress_interval == 0 or processed == total_files:
@@ -735,6 +758,10 @@ def classify_structure_cmd(
         typer.echo("Outputs:")
         for line in outputs:
             typer.echo(line)
+
+    if classified_count == 0:
+        typer.echo("No predictions were produced; structural quality reports were retained.", err=True)
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

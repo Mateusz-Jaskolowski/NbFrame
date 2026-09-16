@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import json
 import math
+from numbers import Real
 import warnings
 
 import joblib
@@ -146,7 +147,7 @@ def load_structure_classifier(verbose: bool = False) -> Tuple[Any, StructureMode
 
 
 def prepare_feature_vector(
-    features: Mapping[str, Optional[float]],
+    features: Mapping[str, Any],
 ) -> Tuple[np.ndarray, List[str]]:
     """
     Convert a structure feature mapping into an ordered feature vector.
@@ -182,7 +183,7 @@ def prepare_feature_vector(
             vals.append(float("nan"))
             continue
 
-        if math.isnan(f_val):
+        if not math.isfinite(f_val):
             missing.append(name)
         vals.append(f_val)
 
@@ -191,7 +192,7 @@ def prepare_feature_vector(
 
 
 def predict_structure_from_features(
-    features: Mapping[str, Optional[float]],
+    features: Mapping[str, Any],
     *,
     use_confidence_thresholds: bool = True,
     kinked_threshold: Optional[float] = None,
@@ -204,6 +205,8 @@ def predict_structure_from_features(
     ----------
     features
         Mapping with at least the keys listed in the metadata ``feature_cols``.
+        An optional quality report (dict or JSON string) accompanies coordinate
+        measurements. An insufficient-quality report withholds inference.
     use_confidence_thresholds
         If True (default), apply confidence thresholds to determine label:
         - P(kinked) > kinked_threshold → "kinked"
@@ -235,16 +238,49 @@ def predict_structure_from_features(
           },
         }
 
+    A withheld result has status="insufficient_quality", null probabilities,
+    and a quality report with affected features. Successful results have
+    status="classified". Without a coordinate report, quality is "not_assessed".
+
     Raises
     ------
     ValueError
-        If one or more required features are missing or invalid.
+        If required features are invalid without an insufficient-quality report.
     RuntimeError
         If the classifier or metadata cannot be loaded.
     """
     clf, meta = load_structure_classifier()
-    X, missing = prepare_feature_vector(features)
-
+    effective_kinked_threshold = kinked_threshold if kinked_threshold is not None else DEFAULT_KINKED_THRESHOLD
+    effective_extended_threshold = extended_threshold if extended_threshold is not None else DEFAULT_EXTENDED_THRESHOLD
+    model_info = {
+        "model_file": meta.model_file,
+        "date_trained": meta.date_trained,
+        "train_csv": meta.train_csv,
+        "feature_cols": list(meta.feature_cols),
+        "thresholds": {
+            "kinked": effective_kinked_threshold,
+            "extended": effective_extended_threshold,
+        },
+        "performance": meta.performance,
+    }
+    quality = features.get("quality")
+    if isinstance(quality, str):
+        quality = json.loads(quality)
+    if quality is not None and (not isinstance(quality, dict) or
+            quality.get("status") not in ("passed", "insufficient_quality", "not_assessed")):
+        raise ValueError("Invalid structure quality report.")
+    quality = quality if quality is not None else {"status": "not_assessed", "issues": []}
+    measurements = {
+        key: None if isinstance(value, Real) and not math.isfinite(value) else value
+        for key, value in features.items() if key != "quality"
+    }
+    messages = [issue["message"] for issue in quality.get("issues", [])]
+    if quality["status"] == "insufficient_quality":
+        return dict(status="insufficient_quality", error="; ".join(messages),
+                    label=None, confidence=None, prob_kinked=None, prob_extended=None,
+                    probabilities={"kinked": None, "extended": None},
+                    features=measurements, model_info=model_info, quality=quality, warnings=messages)
+    X, missing = prepare_feature_vector(measurements)
     if missing:
         raise ValueError(
             "Cannot run structure classifier because the following features "
@@ -288,10 +324,6 @@ def predict_structure_from_features(
     prob_kinked = _prob_for("kinked")
     prob_extended = _prob_for("extended")
 
-    # Use provided thresholds or fall back to defaults
-    effective_kinked_threshold = kinked_threshold if kinked_threshold is not None else DEFAULT_KINKED_THRESHOLD
-    effective_extended_threshold = extended_threshold if extended_threshold is not None else DEFAULT_EXTENDED_THRESHOLD
-
     # Determine label based on confidence thresholds or argmax
     if use_confidence_thresholds:
         if prob_kinked > effective_kinked_threshold:
@@ -310,18 +342,6 @@ def predict_structure_from_features(
         label = name_by_code.get(best_code, str(best_code))
         confidence = prob_kinked if label == "kinked" else prob_extended
 
-    model_info = {
-        "model_file": meta.model_file,
-        "date_trained": meta.date_trained,
-        "train_csv": meta.train_csv,
-        "feature_cols": list(meta.feature_cols),
-        "thresholds": {
-            "kinked": effective_kinked_threshold,
-            "extended": effective_extended_threshold,
-        },
-        "performance": meta.performance,
-    }
-
     return {
         "label": label,
         "confidence": confidence,
@@ -331,8 +351,12 @@ def predict_structure_from_features(
             "kinked": prob_kinked,
             "extended": prob_extended,
         },
-        "features": dict(features),
+        "features": measurements,
         "model_info": model_info,
+        "status": "classified",
+        "error": None,
+        "quality": quality,
+        "warnings": messages,
     }
 
 
@@ -389,8 +413,9 @@ def classify_structure(
     Returns
     -------
     dict or None
-        Result dictionary combining structural features and classifier output,
-        or None if:
+        Result dictionary combining structural features, quality, and classifier
+        output. Coordinate-quality failures return status="insufficient_quality"
+        with no label/probability and an explanatory report. Returns None if:
         - The structure was filtered out by RMSD threshold
         - No VHH chain was found (when strict=False)
 
@@ -427,9 +452,6 @@ def classify_structure(
 
     feature_dict = features_list[0]
 
-    # Currently compute_features_for_pdbs does not expose the actual chain_id
-    # chosen when auto-detecting; if this becomes important we can extend its
-    # API. For now, we simply echo the hint (or None).
     pred = predict_structure_from_features(
         feature_dict,
         use_confidence_thresholds=use_confidence_thresholds,
@@ -439,7 +461,7 @@ def classify_structure(
 
     result: Dict[str, Any] = {
         "pdb_path": pdb_path,
-        "chain_id_used": chain_id,
+        "chain_id_used": pred["quality"].get("chain_id", chain_id),
         "features": pred["features"],
         "label": pred["label"],
         "confidence": pred["confidence"],
@@ -447,7 +469,11 @@ def classify_structure(
         "prob_kinked": pred["probabilities"]["kinked"],
         "prob_extended": pred["probabilities"]["extended"],
         "model_info": pred["model_info"],
-        "warnings": [],
+        "warnings": pred["warnings"],
+        "status": pred["status"],
+        "error": pred["error"],
+        "quality": pred["quality"],
+        "model_id_used": pred["quality"].get("model_id"),
     }
 
     return result
@@ -510,7 +536,8 @@ def classify_all_nanobodies_in_pdb(
     dict
         Mapping from chain_id -> classification result dict (same schema as
         :func:`classify_structure`), for each detected VHH-like nanobody chain
-        that passes RMSD filtering. Returns empty dict if no VHH chains found
+        that passes RMSD filtering, including insufficient-quality results with
+        no prediction. Returns empty dict if no VHH chains found
         and strict=False.
     """
     if chain_ids is None:
@@ -563,7 +590,11 @@ def classify_all_nanobodies_in_pdb(
             "prob_kinked": pred["probabilities"]["kinked"],
             "prob_extended": pred["probabilities"]["extended"],
             "model_info": pred["model_info"],
-            "warnings": [],
+            "warnings": pred["warnings"],
+            "status": pred["status"],
+            "error": pred["error"],
+            "quality": pred["quality"],
+            "model_id_used": pred["quality"].get("model_id"),
         }
 
     return results
