@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Check observed heavy-atom completeness and backbone continuity around CDR3,
+  FR2, the RSA key residue, and angle anchors before structure classification.
+- Report coordinate-quality details, actual chain/model identity, status, and
+  failure reasons. Incomplete inputs return `insufficient_quality` with no
+  probability; their reports remain available in multi-chain results and CLI
+  JSON/CSV exports, including summary exports.
+
 ### Fixed
 - Preserve AHo base positions when aligning sequences with insertions; reject
   malformed or insufficiently resolved pre-aligned inputs.
@@ -23,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intervals; keep direct renumbering outputs alive until caller cleanup.
 
 ### Compatibility notes
+- Some structures with unresolved atoms now have predictions withheld despite
+  passing framework RMSD filtering. Complete-input model scores are unchanged.
+  The structure CLI exits with code 1 when all reported predictions are withheld,
+  after writing requested quality reports. See the structure-classifier guide
+  for the checks and their limits.
 - Sequence alignment output is a 149-column projection onto base AHo positions;
   insertion residues remain in the original input sequence.
 - Directory feature `Structure_ID` values and dictionary keys are now relative

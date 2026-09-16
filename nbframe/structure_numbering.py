@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Union
 
 import sys
+import json
 import tempfile
 import hashlib
 import warnings
@@ -1144,6 +1145,8 @@ def compute_features_for_pdb_directory(
         }
         # Merge the structure-based features into the row.
         row.update(feats)
+        if isinstance(row.get("quality"), dict):
+            row["quality"] = json.dumps(row["quality"], allow_nan=False)
         rows.append(row)
 
     columns = ["Structure_ID", "pdb_path", *STRUCTURE_FEATURE_COLUMNS]

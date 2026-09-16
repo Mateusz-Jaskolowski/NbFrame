@@ -120,8 +120,66 @@ Angle calculations require CA atoms and connected peptide neighbours. Missing
 backbone atoms or broken C–N/CA connectivity return missing angles and prevent
 classification, rather than allowing later resolved residues to substitute for
 missing neighbours. Framework-filter warnings distinguish excessive RMSD from
-insufficient matching framework coverage. These checks do not establish full
-sidechain or loop completeness.
+insufficient matching framework coverage.
+
+### Coordinate completeness and withheld predictions
+
+Classification also checks the coordinates used by the structural features.
+The current conservative policy requires all expected standard-residue heavy
+atoms in the resolved CDR3 and FR2 regions, including the RSA key residue at
+AHo 44. Hydrogens and terminal OXT are optional. Missing atoms, non-finite
+coordinates, and atoms with non-positive or non-finite occupancy are unusable. Unknown
+occupancy is accepted when coordinates are present.
+
+All base FR2 positions 44–55 must be present. CDR3 numbering gaps are allowed:
+they are not interpreted as missing residues. Observed neighbours spanning
+CDR3 and FR2 must have usable backbone atoms, C–N distances of 0.8–2.0 Å,
+and CA–CA distances of 2.5–4.5 Å. Angle anchors are checked separately.
+
+Missing heavy atoms or broken backbone connectivity in these regions
+conservatively invalidate contact and RSA measurements. Invalidated features
+are returned as `None`; the classifier returns `status="insufficient_quality"`,
+with `label`, confidence, and probabilities set to `None`. The `quality` report
+lists affected features, residue identities (including insertions), atom
+completeness, required positions, and backbone breaks. This status describes
+insufficient input data; it is distinct from the model's `uncertain` label.
+
+Complete inputs return `status="classified"`. Their feature definitions and
+model coefficients are unchanged. Some deposited structures omit disordered
+sidechains and will now have predictions withheld, even when they pass the
+framework RMSD filter. `--no-rmsd-filter` disables only that framework filter;
+it does not disable coordinate-completeness checks.
+
+```python
+result = classify_structure("nanobody.pdb", chain_id="B")
+if result is None:
+    print("No result: framework filtering or no eligible chain")
+elif result["status"] == "insufficient_quality":
+    print(result["error"])
+    print(result["quality"]["regions"])
+else:
+    print(result["label"], result["prob_kinked"])
+```
+
+Multi-chain classification retains withheld results alongside successful ones.
+The CLI writes these reports to JSON/CSV, including with `--summary-only`, and
+exits with code 1 if none of the reported chains produced a prediction. Mixed
+runs with at least one prediction exit successfully. Existing no-chain and
+framework-filter behavior remains unchanged.
+
+The report's atom-completeness fractions use the expected atoms of **observed
+residues**, not a full-sequence coverage estimate. `sequence_coverage` is
+`"not_assessed"`: the package does not reconstruct unresolved sequence from
+SEQRES or mmCIF polymer records. These checks also do not assess experimental
+resolution, B factors, atoms outside the checked regions (except non-finite
+coordinates affecting SASA), or all possible alternate conformers. Alternate
+locations generate a warning; features use the selected conformers. A passed
+report is a coordinate check, not a guarantee of biological accuracy.
+
+Feature-only calls to `predict_structure_from_features` retain their existing
+numeric-input API and report quality as `"not_assessed"` when no coordinate
+report is supplied. Feature tables carry the report as a JSON `quality` column;
+CSV round trips preserve withheld status. Non-finite model inputs are rejected.
 
 Direct callers of `renumber_structure_to_aho` who omit `temp_dir` own the returned
 temporary directory and must remove it when finished. For example, after using

@@ -27,6 +27,8 @@ from Bio.PDB.Chain import Chain
 from Bio.PDB.Residue import Residue
 from Bio.PDB.Structure import Structure
 
+from .structure_quality import assess_structure_quality, is_usable_atom
+
 from .structure_config import (
     CDR2_AHOS,
     CDR3_AHOS,
@@ -150,13 +152,14 @@ def _compute_terminal_angles(chain, breakpoint):
     if k is None or k < 1 or k + 2 >= len(residues):
         return None, None
     segment = residues[k - 1:k + 3]
-    if any("CA" not in residue for residue in segment):
+    if any("CA" not in residue or not is_usable_atom(residue["CA"]) for residue in segment):
         return None, None
     # Consecutive resolved residues need not be covalently adjacent. Confirm
     # peptide connectivity without imposing consecutive AHo numbers (numbering
     # gaps are legitimate). Missing peptide atoms cannot establish continuity.
     for left, right in zip(segment, segment[1:]):
-        if "C" not in left or "N" not in right:
+        if ("C" not in left or "N" not in right or
+                not is_usable_atom(left["C"]) or not is_usable_atom(right["N"])):
             return None, None
         distance = float(left["C"] - right["N"])
         if not math.isfinite(distance) or not 0.8 <= distance <= 2.0:
@@ -196,7 +199,8 @@ class StructureFeatureDict(TypedDict, total=False):
 
     The classifier uses cos_alpha_N, tau_N, cos_alpha_C, tau_C, contact_nres,
     and fr2_rsa_key. Raw dihedrals and legacy contact_density are also returned
-    for interpretation. High-level numbering APIs add framework_rmsd.
+    for interpretation. The quality entry describes coordinate checks and
+    invalidated measurements. High-level numbering APIs add framework_rmsd.
 
     Note: cdr2_length and cdr3_length were tested but NOT included in the
     classifier (see CDR Length Functions section for details).
@@ -207,10 +211,11 @@ class StructureFeatureDict(TypedDict, total=False):
     tau_C: Optional[float]
     cos_alpha_N: Optional[float]
     cos_alpha_C: Optional[float]
-    contact_density: float
-    contact_nres: float
+    contact_density: Optional[float]
+    contact_nres: Optional[float]
     fr2_rsa_key: Optional[float]
     framework_rmsd: Optional[float]
+    quality: dict
     # CDR lengths - available via compute_cdr2_length/compute_cdr3_length
     # but NOT included in classifier features (tested, did not improve model)
 
@@ -715,7 +720,8 @@ def compute_structure_features(
         The six classifier inputs plus raw alpha_N/alpha_C dihedrals and
         legacy contact_density. fr2_rsa_key measures RSA at AHo 44. CDR lengths
         are available through separate helpers; framework_rmsd is added by
-        the higher-level numbering APIs.
+        the higher-level numbering APIs. The quality entry contains coordinate
+        checks; affected measurements are None when their inputs are incomplete.
     """
     structure = load_structure(pdb_path, seqid_for_log=seqid_for_log or "")
     chain = get_chain(structure, chain_id)
@@ -725,8 +731,13 @@ def compute_structure_features(
     alpha_C, tau_C = compute_c_terminal_angles(chain)
     alpha_N, tau_N = compute_n_terminal_angles(chain)
 
+    quality = assess_structure_quality(chain, {
+        "alpha_N": alpha_N, "tau_N": tau_N, "alpha_C": alpha_C, "tau_C": tau_C,
+    })
+    invalid = set(quality["invalid_features"])
+
     # Contacts (soft logistic switch by default in v0.2.0+; see structure_config)
-    contact_density = compute_cdr3_fr2_contacts(
+    contact_density = None if "contact_density" in invalid else compute_cdr3_fr2_contacts(
         residues_by_aho,
         CDR3_AHOS,
         soft=USE_SOFT_CONTACTS,
@@ -737,7 +748,7 @@ def compute_structure_features(
     # Number of CDR3 residues contacting FR2 (v0.3.0 classifier feature). Unlike
     # contact_density this is NOT normalised by loop length, so a localised
     # contact in a long loop is not diluted - matching the expert definition.
-    contact_nres = compute_cdr3_fr2_contact_nres(
+    contact_nres = None if "contact_nres" in invalid else compute_cdr3_fr2_contact_nres(
         residues_by_aho,
         CDR3_AHOS,
         soft=USE_SOFT_CONTACTS,
@@ -746,7 +757,7 @@ def compute_structure_features(
     )
 
     # FR2 RSA (v0.3.0: key position 44 only; see structure_config.FR2_KEY_RSA_AHOS)
-    fr2_rsa_key = compute_fr2_rsa(structure, chain_id)
+    fr2_rsa_key = None if "fr2_rsa_key" in invalid else compute_fr2_rsa(structure, chain_id)
 
     # Circular (cosine) encoding of the CDR3 dihedrals (v0.2.0+). alpha_N/alpha_C
     # are dihedral angles in (-180, 180]; feeding raw degrees to the linear model
@@ -771,8 +782,12 @@ def compute_structure_features(
         "contact_density": contact_density,
         "contact_nres": contact_nres,
         "fr2_rsa_key": fr2_rsa_key,
+        "quality": quality,
     }
 
+    for name in invalid:
+        if name in features:
+            features[name] = None
     return features
 
 

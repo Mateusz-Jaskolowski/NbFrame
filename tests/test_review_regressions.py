@@ -269,7 +269,7 @@ def test_f09_directory_cli_discovers_mmcif(tmp_path):
 
 def test_f10_directory_dataframe_and_csv_are_valid_classifier_inputs(tmp_path):
     inputs = tmp_path/'input'; inputs.mkdir()
-    shutil.copyfile(PDB,inputs/'sample.pdb')
+    shutil.copyfile(DATA/'pdbs/kinked/9bsv.pdb',inputs/'sample.pdb')
     output = tmp_path/'features.csv'
     df = nbframe.compute_features_for_pdb_directory(inputs,output_csv=output)
     _, meta = load_structure_classifier()
