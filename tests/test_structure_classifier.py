@@ -8,7 +8,7 @@ and CLI commands.
 import unittest
 from pathlib import Path
 
-from click import unstyle
+from rich.text import Text
 from typer.testing import CliRunner
 
 import nbframe
@@ -83,8 +83,8 @@ class TestStructureClassifier(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("classify-structure", result.output)
         # Check for key options
-        self.assertIn("--pdb", unstyle(result.output))
-        self.assertIn("--pdb-dir", unstyle(result.output))
+        self.assertIn("--pdb", Text.from_ansi(result.output).plain)
+        self.assertIn("--pdb-dir", Text.from_ansi(result.output).plain)
 
 
 class TestStructureClassifierWithPDBs(unittest.TestCase):
