@@ -150,7 +150,7 @@ def _contiguous_regions(condition):
         idx = np.r_[0, idx]
     if condition[-1]:
         idx = np.r_[idx, condition.size]
-    idx.shape = (-1, 2)
+    idx = idx.reshape(-1, 2)
     return [tuple(row) for row in idx]
 
 
