@@ -88,27 +88,14 @@ class TestStructureFeaturesWithPDBs(unittest.TestCase):
         if not self.has_kinked_pdbs:
             self.skipTest("Kinked PDB test files not available")
 
-        pdb_path = next(self.kinked_pdbs_dir.glob("*.pdb"))
-
-        # This will compute features if the PDB has a valid VHH chain
-        try:
-            features = compute_structure_features(str(pdb_path))
-
-            # Verify expected feature keys
-            expected_keys = ['alpha_N', 'tau_N', 'alpha_C', 'tau_C',
-                           'contact_density', 'contact_nres', 'fr2_rsa_key']
-            for key in expected_keys:
-                self.assertIn(key, features, f"Missing expected feature: {key}")
-
-            # Verify features are numeric (some may be None if computation failed)
-            for key in expected_keys:
-                if features[key] is not None:
-                    self.assertIsInstance(features[key], (int, float),
-                                        f"Feature {key} should be numeric")
-
-        except (ValueError, RuntimeError, KeyError) as e:
-            # Some PDBs may not have valid VHH chains or correct chain IDs
-            self.skipTest(f"PDB does not have valid VHH chain: {e}")
+        from nbframe.structure_numbering import compute_features_from_pdb
+        pdb_path = self.kinked_pdbs_dir / "9bsv.pdb"
+        features = compute_features_from_pdb(str(pdb_path), chain_id="D")
+        self.assertEqual(features["quality"]["status"], "passed")
+        for key in ('alpha_N', 'tau_N', 'alpha_C', 'tau_C',
+                    'contact_density', 'contact_nres', 'fr2_rsa_key'):
+            self.assertIsInstance(features[key], (int, float),
+                                  f"Feature {key} should be numeric")
 
     def test_feature_values_differ_by_conformation(self):
         """Test that kinked and extended structures have different feature values."""
@@ -118,8 +105,8 @@ class TestStructureFeaturesWithPDBs(unittest.TestCase):
         # Use classify_structure which auto-detects VHH chains
         from nbframe import classify_structure
 
-        kinked_pdb = next(self.kinked_pdbs_dir.glob("*.pdb"))
-        extended_pdb = next(self.extended_pdbs_dir.glob("*.pdb"))
+        kinked_pdb = self.kinked_pdbs_dir / "9bsv.pdb"
+        extended_pdb = self.extended_pdbs_dir / "9bdo.pdb"
 
         # Get features via classify_structure (which auto-detects chains)
         kinked_result = classify_structure(str(kinked_pdb))

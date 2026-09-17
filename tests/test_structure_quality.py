@@ -179,7 +179,8 @@ def test_table_quality_round_trip_for_incomplete_structure(tmp_path):
 
 def test_complete_prediction_matches_saved_baseline():
     result = nbframe.classify_structure(str(PDB), chain_id='D', filter_by_rmsd=False)
-    assert result['prob_kinked'] == pytest.approx(0.9934712575233963, abs=1e-12)
+    # Geometry starts from float32 coordinates; allow platform-level rounding.
+    assert result['prob_kinked'] == pytest.approx(0.9934712575233963, abs=1e-8, rel=0)
 
 
 def test_zero_occupancy_angle_anchor_is_unmeasurable(aho, tmp_path):

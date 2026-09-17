@@ -8,6 +8,7 @@ import tempfile
 import os
 from pathlib import Path
 
+from click import unstyle
 from typer.testing import CliRunner
 
 from nbframe.cli import app as cli_app
@@ -39,7 +40,7 @@ class TestSequenceClassifierCLI(unittest.TestCase):
         result = self.runner.invoke(cli_app, ["classify-sequence", "--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("classify-sequence", result.output)
-        self.assertIn("--sequence", result.output)
+        self.assertIn("--sequence", unstyle(result.output))
 
     def test_classify_single_sequence(self):
         """Test classifying a single sequence via CLI."""
@@ -126,7 +127,7 @@ class TestStructureClassifierCLI(unittest.TestCase):
         result = self.runner.invoke(cli_app, ["classify-structure", "--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("classify-structure", result.output)
-        self.assertIn("--pdb", result.output)
+        self.assertIn("--pdb", unstyle(result.output))
 
     def test_classify_single_pdb(self):
         """Test classifying a single PDB file via CLI."""
