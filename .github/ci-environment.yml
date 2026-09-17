@@ -1,0 +1,9 @@
+name: nbframe-ci
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - hmmer
+  - anarci
+  - scikit-learn=1.7.2
+  - pip

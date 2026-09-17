@@ -9,6 +9,7 @@ Configuration and constants for sequence-based classifier.
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
+from .validation import validate_thresholds
 
 #
 # Default thresholds for sequence classifier labels
@@ -77,6 +78,7 @@ def assign_label(
         "uncertain", and confidence is the relevant probability (or
         None if uncertain).
     """
+    kinked_threshold, extended_threshold = validate_thresholds(kinked_threshold, extended_threshold)
     if probability > kinked_threshold:
         return "kinked", probability
     elif probability < extended_threshold:

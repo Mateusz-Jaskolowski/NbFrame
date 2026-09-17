@@ -16,7 +16,7 @@ NbFrame is a Python package that predicts whether a nanobody (VHH) has a kinked 
 
 ```bash
 # Clone the repository
-git clone https://github.com/Mateusz-Jaskolowski/NbFrame.git
+git clone --branch v0.3.0 https://github.com/Mateusz-Jaskolowski/NbFrame.git
 cd NbFrame
 
 # Create and activate environment
@@ -24,13 +24,16 @@ conda env create -f environment.yml
 conda activate nbframe
 
 # Install the package
-pip install -e .
+pip install .
 
 # Verify installation
 nbframe --help
 ```
 
-NbFrame requires HMMER and ANARCI for sequence alignment. The Conda environment handles these automatically.
+NbFrame requires HMMER and ANARCI for sequence alignment. The Conda environment handles these automatically. The bundled models require
+scikit-learn 1.7.2, matching their serialization environment. Installations on
+Linux and macOS are checked in CI with Python 3.10 and 3.12. For development,
+clone the default branch and use `pip install -e .`.
 
 ## Quick Start
 
@@ -90,3 +93,10 @@ Apache License 2.0. See [LICENSE](LICENSE) for details.
 Developed with high affinity for caffeine and a low dissociation constant for long coding sessions in [Sormanni Lab](https://www-sormanni.ch.cam.ac.uk/) at the University of Cambridge, Department of Chemistry.
 
 No actual llamas were harmed (or even consulted) during the making of this classifier.
+
+## Release checks
+
+GitHub Actions runs the test suite, builds source and wheel distributions, and
+installs the wheel into a separate environment. That installation is checked
+outside the checkout using both models, real PDB/mmCIF inputs, the CLI, and
+package-resource checks. See [release validation](docs/releasing.md).

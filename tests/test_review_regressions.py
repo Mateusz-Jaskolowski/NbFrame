@@ -11,6 +11,7 @@ from Bio.PDB import MMCIFIO, PDBIO
 from Bio.PDB.Atom import Atom
 from Bio.PDB.Chain import Chain
 from Bio.PDB.Residue import Residue
+from rich.text import Text
 from typer.testing import CliRunner
 
 import nbframe
@@ -300,14 +301,15 @@ def test_f12_all_chains_filtered_cli_has_actionable_message():
         result=CliRunner().invoke(app,['classify-structure','-p',str(PDB),'--rmsd-threshold','0'])
     assert result.exit_code == 1
     assert not isinstance(result.exception,StopIteration)
-    assert 'no chains passed framework quality filtering' in result.output
+    assert 'prediction withheld (filtered)' in result.output
+    assert 'framework RMSD' in result.output
 
 
 def test_f12_zero_progress_is_rejected_before_work(tmp_path):
     result=CliRunner().invoke(app,['classify-structure','-d',str(tmp_path),'--progress-interval','0'])
     assert result.exit_code == 2
     assert not isinstance(result.exception,ZeroDivisionError)
-    assert '--progress-interval' in result.output
+    assert '--progress-interval' in Text.from_ansi(result.output).plain
 
 
 def test_f12_insufficient_coverage_has_its_own_reason():

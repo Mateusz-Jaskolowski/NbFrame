@@ -8,6 +8,7 @@ and CLI commands.
 import unittest
 from pathlib import Path
 
+from rich.text import Text
 from typer.testing import CliRunner
 
 import nbframe
@@ -82,8 +83,8 @@ class TestStructureClassifier(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("classify-structure", result.output)
         # Check for key options
-        self.assertIn("--pdb", result.output)
-        self.assertIn("--pdb-dir", result.output)
+        self.assertIn("--pdb", Text.from_ansi(result.output).plain)
+        self.assertIn("--pdb-dir", Text.from_ansi(result.output).plain)
 
 
 class TestStructureClassifierWithPDBs(unittest.TestCase):
@@ -109,8 +110,7 @@ class TestStructureClassifierWithPDBs(unittest.TestCase):
             self.skipTest("Kinked PDB test files not available")
 
         # Test with first available kinked PDB
-        kinked_pdbs = list(self.kinked_pdbs_dir.glob("*.pdb"))
-        pdb_path = kinked_pdbs[0]
+        pdb_path = self.kinked_pdbs_dir / "9bsv.pdb"
 
         result = classify_structure(str(pdb_path))
 
@@ -129,8 +129,7 @@ class TestStructureClassifierWithPDBs(unittest.TestCase):
             self.skipTest("Extended PDB test files not available")
 
         # Test with first available extended PDB
-        extended_pdbs = list(self.extended_pdbs_dir.glob("*.pdb"))
-        pdb_path = extended_pdbs[0]
+        pdb_path = self.extended_pdbs_dir / "9bdo.pdb"
 
         result = classify_structure(str(pdb_path))
 

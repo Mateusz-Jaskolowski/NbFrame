@@ -6,7 +6,7 @@ dependencies:
   - python=3.10
   - hmmer
   - anarci
-  - scikit-learn>=1.2
+  - scikit-learn=1.7.2
   - biopython>=1.80
   - pandas>=1.5
   - numpy>=1.24

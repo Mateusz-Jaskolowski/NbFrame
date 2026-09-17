@@ -1,0 +1,7 @@
+include CHANGELOG.md environment.yml
+include data/supplementary_table_all_929_structures.csv
+include docs/sequence-classifier.md docs/structure-classifier.md docs/output-formats.md docs/releasing.md
+recursive-include scripts *.py
+recursive-include tests *.py *.pdb *.cif *.fasta *.md
+exclude docs/review-*.md
+prune nbframe/data/archive

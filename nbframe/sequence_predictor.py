@@ -9,7 +9,6 @@ Sequence-based CDR3 conformation classifier.
 This module provides functions to predict whether a nanobody has a kinked or
 extended CDR3 conformation based on its amino acid sequence.
 """
-import warnings
 import joblib
 import numpy as np
 import pandas as pd
@@ -23,6 +22,7 @@ console = Console(stderr=True, log_time=True, log_path=False)
 
 # --- Relative imports for modules within the nbframe package ---
 from . import sequence_align as align
+from .validation import validate_thresholds
 from .sequence_config import (
     DEFAULT_SEQ_KINKED_THRESHOLD,
     DEFAULT_SEQ_EXTENDED_THRESHOLD,
@@ -111,16 +111,17 @@ def results_to_dataframe(results_list, names=None, do_alignment=True):
         'name': names,
         'sequence': [r['input_sequence'] for r in results_list],
         'probability': [r['probability'] for r in results_list],
-        'raw_score': [r['raw_score'] for r in results_list]
+        'raw_score': [r['raw_score'] for r in results_list],
+        'status': ['classified' if r['probability'] is not None else 'error' for r in results_list],
+        'error': [r.get('error') for r in results_list],
     }
+
+    if any("label" in r for r in results_list):
+        data["label"] = [r.get("label") for r in results_list]
 
     # Add aligned_sequence column if alignment was performed
     if do_alignment:
         data['aligned_sequence'] = [r['aligned_sequence'] for r in results_list]
-
-    # Add error column if any errors occurred
-    if any(r['error'] is not None for r in results_list):
-        data['error'] = [r['error'] for r in results_list]
 
     # Create the dataframe
     df = pd.DataFrame(data)
@@ -162,10 +163,7 @@ def _load_lr_model(verbose=False):
     if lr_model_bundle is None:
         try:
             with resources.files('nbframe').joinpath(LR_MODEL_PKG_PATH).open('rb') as f:
-                # Suppress sklearn version mismatch warnings - the model is robust to minor version differences
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-                    lr_model_bundle = joblib.load(f)
+                lr_model_bundle = joblib.load(f)
             if verbose:
                 console.log("Loaded LR sequence classifier (2026-01-19, Top 20 hallmarks).")
         except FileNotFoundError:
@@ -438,6 +436,7 @@ def classify_sequence(
     >>> print(result['probability'])
     0.85
     """
+    kinked_threshold, extended_threshold = validate_thresholds(kinked_threshold, extended_threshold)
     # Get prediction
     pred_result = predict_kink_probability(
         sequence=sequence,
@@ -466,6 +465,7 @@ def classify_sequence(
             'extended': extended_threshold,
         },
         'error': pred_result['error'],
+        'status': 'classified' if prob is not None else 'error',
     }
 
 
@@ -509,6 +509,7 @@ def classify_sequences(
     list[dict]
         List of classification result dictionaries (same schema as :func:`classify_sequence`).
     """
+    kinked_threshold, extended_threshold = validate_thresholds(kinked_threshold, extended_threshold)
     # Get batch predictions
     pred_results = predict_kink_probabilities(
         sequences=sequences,
@@ -541,6 +542,7 @@ def classify_sequences(
                 'extended': extended_threshold,
             },
             'error': pred_result['error'],
+            'status': 'classified' if prob is not None else 'error',
         })
 
     return results

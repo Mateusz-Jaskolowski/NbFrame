@@ -24,6 +24,7 @@ nbframe classify-structure [OPTIONS]
 | `--output-aho-pdb DIR` | Save AHo-numbered structures; multi-character chain IDs use mmCIF |
 | `-v, --verbose` | Show detailed output |
 | `--recursive` | Search PDB directory recursively |
+| `--unique-sequences` | Group identical observed sequences after classifying all copies; retain every copy in the group report |
 | `--summary-only` | Exclude per-structure features from JSON and CSV output |
 | `--no-rmsd-filter` | Disable framework RMSD quality filter |
 | `--rmsd-threshold FLOAT` | Maximum framework RMSD (default: 2.0 Å) |
@@ -152,11 +153,11 @@ it does not disable coordinate-completeness checks.
 
 ```python
 result = classify_structure("nanobody.pdb", chain_id="B")
-if result is None:
-    print("No result: framework filtering or no eligible chain")
-elif result["status"] == "insufficient_quality":
+if result["status"] == "insufficient_quality":
     print(result["error"])
     print(result["quality"]["regions"])
+elif result["status"] != "classified":
+    print(result["status"], result["error"])
 else:
     print(result["label"], result["prob_kinked"])
 ```
@@ -285,3 +286,33 @@ marginal change on held-out crystal structures.
 ---
 
 See [Output Formats](output-formats.md) for details on CSV and JSON output schemas.
+
+## Structural copies and failure reporting
+
+By default, `classify_all_nanobodies_in_pdb` and the CLI report every detected
+VHH chain from the first model, including copies with identical observed
+sequences. Copies can have different coordinates and different classifications.
+
+Use `unique_sequences=True` or `--unique-sequences` to group after classification.
+The representative is selected by usable prediction, then lower framework RMSD,
+then chain ID. It is never selected by prediction confidence. `sequence_group`
+retains all copy results, chain IDs, the probability range among classified
+copies, and `label_disagreement`. A representative is not a consensus estimate.
+Explicitly requested chain IDs are always reported individually.
+
+`classify_structure` without a chain ID uses the same selection rule and reports
+candidate IDs in `selection`; use the multi-chain API to inspect every result.
+
+High-level classification returns `filtered` records for framework-filter
+failures and `error` records for individual processing failures in a batch.
+With `strict=False`, files with no eligible chain or unreadable input produce an
+`__input__` record with `chain_id_used=None`. The default strict mode raises for
+these input-level failures. The lower-level feature-only APIs keep their existing
+`None`/skip behavior for framework-filter failures.
+
+The CLI retains failed and filtered records in JSON/CSV, and returns exit code 1
+if no predictions were produced. Mixed successful/failed runs return 0; inspect
+`status` and `error` to identify failures. Configuration errors return 2 before
+processing. Thresholds must satisfy `0 <= extended < kinked <= 1` and be finite;
+framework RMSD limits must be finite and non-negative. Structure threshold
+defaults come from the bundled model metadata.
